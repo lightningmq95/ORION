@@ -121,11 +121,12 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/lidar/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
+            # '/lidar/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
+            '/lidar/points/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
         ],
         output='screen'
     )
-    
+
     # Bridge for IMU data (Gazebo->ROS uses [)
     bridge_imu = Node(
         package='ros_gz_bridge',
