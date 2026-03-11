@@ -18,64 +18,6 @@ import termios
 import tty
 import math
 
-
-# class RobotKeyboardControl(Node):
-#     """Keyboard control node for the robot with IMU monitoring."""
-    
-#     def __init__(self):
-#         super().__init__('robot_keyboard_control')
-        
-#         # Publisher for velocity commands
-#         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        
-#         # Subscriber for IMU data
-#         self.imu_sub = self.create_subscription(
-#             Imu,
-#             '/imu',
-#             self.imu_callback,
-#             10
-#         )
-
-#         # Subscriber for Odometry data
-#         self.odom_sub = self.create_subscription(
-#             Odometry,
-#             '/odom',
-#             self.odom_callback,
-#             10
-#         )
-        
-#         # Control parameters
-#         self.max_linear_speed = 0.5  # m/s
-#         self.max_angular_speed = 1.0  # rad/s
-#         self.current_linear_speed = 0.3
-#         self.current_angular_speed = 0.5
-        
-#         # IMU data storage
-#         self.imu_data = {
-#             'orientation': {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0},
-#             'angular_velocity': {'x': 0.0, 'y': 0.0, 'z': 0.0},
-#             'linear_acceleration': {'x': 0.0, 'y': 0.0, 'z': 0.0}
-#         }
-#         self.show_imu = False
-#         self.imu_received = False
-        
-#         self.get_logger().info('Robot Keyboard Control with IMU Started!')
-#         self.get_logger().info('=' * 50)
-#         self.get_logger().info('Controls:')
-#         self.get_logger().info('  W: Forward')
-#         self.get_logger().info('  S: Backward')
-#         self.get_logger().info('  A: Turn Left')
-#         self.get_logger().info('  D: Turn Right')
-#         self.get_logger().info('  Up Arrow: Increase Speed')
-#         self.get_logger().info('  Down Arrow: Decrease Speed')
-#         self.get_logger().info('  Space: Stop')
-#         self.get_logger().info('  I: Toggle IMU Display')
-#         self.get_logger().info('  Q: Quit')
-#         self.get_logger().info('=' * 50)
-        
-#         # Start keyboard input loop
-#         self.run_keyboard_control()
-
 class RobotKeyboardControl(Node):
     """Keyboard control node for the robot with IMU monitoring."""
     

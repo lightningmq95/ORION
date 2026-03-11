@@ -420,7 +420,7 @@
       <always_on>true</always_on>
       <update_rate>10</update_rate>
       <visualize>true</visualize>
-      <topic>lidar/points</topic>
+      <topic>lidar</topic>
       <ignition_frame_id>lidar_link</ignition_frame_id>
       <lidar>
         <scan>

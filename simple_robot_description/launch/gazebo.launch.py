@@ -27,13 +27,12 @@ def generate_launch_description():
     
     # Paths
     urdf_file = os.path.join(pkg_simple_robot, 'urdf', 'simple_robot.urdf.xacro')
-    world_file = os.path.join(pkg_simple_robot, 'config', 'simple_world.sdf')
     
     # Process xacro to get robot description
     robot_description_config = xacro.process_file(urdf_file)
     robot_description = {'robot_description': robot_description_config.toxml()}
 
-    world_name_arg= DeclareLaunchArgument(name="world_name", default_value="empty")
+    world_name_arg = DeclareLaunchArgument(name="world_name", default_value="empty")
 
     world_path = PathJoinSubstitution([
         pkg_simple_robot,
@@ -81,7 +80,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/camera/left/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image',
+            '/camera/left/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
         ],
         output='screen'
     )
@@ -91,7 +90,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/camera/right/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image',
+            '/camera/right/image_raw@sensor_msgs/msg/Image[gz.msgs.Image',
         ],
         output='screen'
     )
@@ -101,7 +100,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/camera/left/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo',
+            '/camera/left/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
         ],
         output='screen'
     )
@@ -111,7 +110,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/camera/right/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo',
+            '/camera/right/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo',
         ],
         output='screen'
     )
@@ -121,8 +120,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            # '/lidar/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
-            '/lidar/points/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
+           '/lidar/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
         ],
         output='screen'
     )
@@ -132,7 +130,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU',
+            '/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
         ],
         output='screen'
     )
@@ -152,7 +150,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
+            '/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
         ],
         output='screen'
     )
@@ -176,6 +174,22 @@ def generate_launch_description():
         ],
         output='screen'
     )
+
+    bridge_tf = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+           '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
+        ],
+        output='screen'
+    )
+
+    static_tf = Node(
+    package="tf2_ros",
+    executable="static_transform_publisher",
+    arguments=["0", "0", "0", "0", "0", "0", "base_footprint", "base_link"],
+    output="screen",
+    )
     
     return LaunchDescription([
         gazebo_resource_path,
@@ -193,4 +207,6 @@ def generate_launch_description():
         bridge_odom,
         bridge_cmd_vel,
         bridge_clock,
+        bridge_tf,
+        static_tf
     ])
