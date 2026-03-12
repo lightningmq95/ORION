@@ -60,7 +60,8 @@ Waypoints: Click "Nav2 Goal" (if using the Nav2 RViz plugin) → set multiple wa
 ## Saving Map
 
 ```sh
-ros2 run nav2_map_server map_saver_cli -f ~/my_map
+mkdir map
+ros2 run nav2_map_server map_saver_cli -f map/my_map
 ```
 
-This saves ~/my_map.pgm and ~/my_map.yaml for later use with AMCL localization.
+This saves my_map.pgm and my_map.yaml for later use with AMCL localization.
