@@ -1,3 +1,5 @@
+## Running SLAM with Waypoint Navigation
+
 ### Build the env
 
 ```sh
