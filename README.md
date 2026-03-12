@@ -16,10 +16,51 @@ You can specify a world with:
 ros2 launch simple_robot_description gazebo.launch.py world_name:=simple_world/small_house/small_warehouse(any of them)
 ```
 
+### Run SLAM Toolbox
+
+```sh
+ros2 launch slam_toolbox online_async_launch.py \
+  use_sim_time:=True \
+  slam_params_file:=$HOME/DevDrive/Projects/SensorFusion/simple_robot_description/config/slam_toolbox_params.yaml
+```
+
+### Nav2
+
+```sh
+ros2 launch nav2_bringup navigation_launch.py \
+  use_sim_time:=True \
+  params_file:=$HOME/DevDrive/Projects/SensorFusion/simple_robot_description/config/nav2_params.yaml
+```
+
 ### Run Control Nodes in another terminal
 
 ```sh
 ros2 run simple_robot_control robot_subscriber(W,S,A,D control).
 
-#type-ros2 topic list (to find avaible topics from the simulation which you can use to access camera and other things.)
+# type-ros2 topic list (to find avaible topics from the simulation which you can use to access camera and other things.)
 ```
+
+### RViz2
+
+```sh
+rviz2
+```
+
+### Rviz2 Configuration
+
+In RViz2, configure these displays:
+![Alt text](assets/image.png)
+
+### Waypoint Navigation in RViz2
+
+Once the map is built enough:
+Single goal: Click "2D Nav Goal" in the toolbar → click+drag on the map to set position and orientation
+Waypoints: Click "Nav2 Goal" (if using the Nav2 RViz plugin) → set multiple waypoints → click "Start Navigation"
+
+## Saving Map
+
+```sh
+ros2 run nav2_map_server map_saver_cli -f ~/my_map
+```
+
+This saves ~/my_map.pgm and ~/my_map.yaml for later use with AMCL localization.

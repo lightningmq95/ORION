@@ -116,11 +116,21 @@ def generate_launch_description():
     )
     
     # Bridge for 3D LiDAR point cloud (Gazebo->ROS uses [)
-    bridge_lidar = Node(
+    bridge_lidar_3d = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
            '/lidar/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
+        ],
+        output='screen'
+    )
+
+    # Bridge for 2D LiDAR scan (needed for SLAM)
+    bridge_lidar_2d = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/lidar@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
         ],
         output='screen'
     )
@@ -184,12 +194,12 @@ def generate_launch_description():
         output='screen'
     )
 
-    static_tf = Node(
-    package="tf2_ros",
-    executable="static_transform_publisher",
-    arguments=["0", "0", "0", "0", "0", "0", "base_footprint", "base_link"],
-    output="screen",
-    )
+    # static_tf = Node(
+    #     package="tf2_ros",
+    #     executable="static_transform_publisher",
+    #     arguments=["0", "0", "0", "0", "0", "0", "base_footprint", "base_link", "--ros-args", "-p", "use_sim_time:=true"],
+    #     output="screen",
+    # )
     
     return LaunchDescription([
         gazebo_resource_path,
@@ -201,12 +211,13 @@ def generate_launch_description():
         bridge_camera_right,
         bridge_camera_left_info,
         bridge_camera_right_info,
-        bridge_lidar,
+        bridge_lidar_3d,
+        bridge_lidar_2d,
         bridge_imu,
         bridge_joint_states,
         bridge_odom,
         bridge_cmd_vel,
         bridge_clock,
         bridge_tf,
-        static_tf
+        # static_tf
     ])
