@@ -57,11 +57,35 @@ Once the map is built enough:
 Single goal: Click "2D Nav Goal" in the toolbar → click+drag on the map to set position and orientation
 Waypoints: Click "Nav2 Goal" (if using the Nav2 RViz plugin) → set multiple waypoints → click "Start Navigation"
 
-## Saving Map
+### Saving Map
 
 ```sh
 mkdir map
-ros2 run nav2_map_server map_saver_cli -f map/my_map
+ros2 run nav2_map_server map_saver_cli -f map/my_map_small_house
 ```
 
 This saves my_map.pgm and my_map.yaml for later use with AMCL localization.
+
+## Loading the saved map for localization
+
+### Launch the Simulation
+
+```sh
+ros2 launch simple_robot_description gazebo.launch.py
+```
+
+### Load Map Server + AMCL
+
+```sh
+ros2 launch nav2_bringup localization_launch.py \
+  use_sim_time:=True \
+  map:=$HOME/DevDrive/Projects/SensorFusion/map/my_map_small_house.yaml
+```
+
+### Nav2
+
+```sh
+ros2 launch nav2_bringup navigation_launch.py \
+  use_sim_time:=True \
+  params_file:=$HOME/DevDrive/Projects/SensorFusion/simple_robot_description/config/nav2_params.yaml
+```
