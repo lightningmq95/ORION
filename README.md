@@ -34,7 +34,13 @@ ros2 launch nav2_bringup navigation_launch.py \
   params_file:=$HOME/DevDrive/Projects/SensorFusion/simple_robot_description/config/nav2_params.yaml
 ```
 
-### Run Control Nodes in another terminal
+### Explore Lite (Autonomous Navigation)
+
+```sh
+ros2 launch explore_lite explore.launch.py
+```
+
+### Run Control Nodes in another terminal (if manual control is required)
 
 ```sh
 ros2 run simple_robot_control robot_subscriber(W,S,A,D control).
