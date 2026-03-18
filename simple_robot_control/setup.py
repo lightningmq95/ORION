@@ -23,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'robot_subscriber = simple_robot_control.robot_subscriber:main',
+            'ground_truth = simple_robot_control.ground_truth_node:main',
         ],
     },
 )
