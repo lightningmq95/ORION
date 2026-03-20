@@ -1,0 +1,7 @@
+ekf_node:
+  ros__parameters:
+    process_noise_xy: 0.01 # How much odometry drifts
+    process_noise_yaw: 0.05 # How much heading drifts
+    odom_noise_xy: 0.1 # Trust in odometry xy
+    odom_noise_yaw: 0.2 # Trust in odometry heading
+    imu_heading_noise: 0.05 # Trust in IMU heading
