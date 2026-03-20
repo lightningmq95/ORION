@@ -3,4 +3,6 @@ install/
 log/
 frames_*
 map/
-# m-explore-ros2/
+m-explore-ros2/
+mapper_node_ground_truth.py
+kalman-filter/
