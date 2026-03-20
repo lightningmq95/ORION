@@ -3,5 +3,5 @@ install/
 log/
 frames_*
 map/
-m-explore-ros2/
+autonomousNav/
 mapper_node_ground_truth.py
