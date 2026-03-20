@@ -4,5 +4,5 @@ log/
 frames_*
 map/
 m-explore-ros2/
-mapper_node_ground_truth.py
+simple_robot_control/simple_robot_control/mapper_node_ground_truth.py
 kalman-filter/

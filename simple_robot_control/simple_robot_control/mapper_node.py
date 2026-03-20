@@ -97,8 +97,8 @@ class SimpleMapperNode(Node):
         self.scan_count += 1
         
         # Decay the map periodically to clear ghosts
-        if self.scan_count % self.DECAY_INTERVAL == 0:
-            self.decay_map()
+        # if self.scan_count % self.DECAY_INTERVAL == 0:
+        #     self.decay_map()
 
         rx_grid, ry_grid = self.world_to_grid(self.robot_x, self.robot_y)
         if rx_grid is None:
@@ -131,17 +131,17 @@ class SimpleMapperNode(Node):
 
         self.publish_map()
 
-    def decay_map(self):
-        """Periodically clear old/unconfirmed data to reduce ghosting"""
-        # Decay hit counts and convert back to uint8
-        self.hit_count = (self.hit_count * 0.7).astype(np.uint8)
+    # def decay_map(self):
+    #     """Periodically clear old/unconfirmed data to reduce ghosting"""
+    #     # Decay hit counts and convert back to uint8
+    #     self.hit_count = (self.hit_count * 0.7).astype(np.uint8)
         
-        # Set low-confidence cells back to unknown
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.hit_count[y, x] < self.HITS_REQUIRED:
-                    idx = y * self.width + x
-                    self.map_data[idx] = -1
+    #     # Set low-confidence cells back to unknown
+    #     for y in range(self.height):
+    #         for x in range(self.width):
+    #             if self.hit_count[y, x] < self.HITS_REQUIRED:
+    #                 idx = y * self.width + x
+    #                 self.map_data[idx] = -1
 
     def publish_map(self):
         grid = OccupancyGrid()
