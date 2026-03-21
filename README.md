@@ -18,7 +18,7 @@ You can specify a world with:
 ros2 launch simple_robot_description gazebo.launch.py world_name:=simple_world/small_house/small_warehouse(any of them)
 ```
 
-### Run SLAM Toolbox
+<!-- ### Run SLAM Toolbox
 
 ```sh
 ros2 launch slam_toolbox online_async_launch.py \
@@ -38,14 +38,26 @@ ros2 launch nav2_bringup navigation_launch.py \
 
 ```sh
 ros2 launch explore_lite explore.launch.py
-```
+``` -->
 
-### Run Control Nodes in another terminal (if manual control is required)
+### Run Control Nodes in another terminal (Manual Control)
 
 ```sh
 ros2 run simple_robot_control robot_subscriber(W,S,A,D control).
 
 # type-ros2 topic list (to find avaible topics from the simulation which you can use to access camera and other things.)
+```
+
+### Start Extended Kalman Filter Node
+
+```sh
+ros2 run simple_robot_control ekf_node
+```
+
+### Start Mapper Node
+
+```sh
+ros2 run simple_robot_control mapper_node
 ```
 
 ### RViz2
@@ -54,7 +66,9 @@ ros2 run simple_robot_control robot_subscriber(W,S,A,D control).
 rviz2
 ```
 
-### Rviz2 Configuration
+Go to Add -> By Topic -> /map
+
+<!-- ### Rviz2 Configuration
 
 In RViz2, configure these displays:
 ![Alt text](assets/image.png)
@@ -96,4 +110,4 @@ ros2 launch nav2_bringup localization_launch.py \
 ros2 launch nav2_bringup navigation_launch.py \
   use_sim_time:=True \
   params_file:=$HOME/DevDrive/Projects/SensorFusion/simple_robot_description/config/nav2_params.yaml
-```
+``` -->

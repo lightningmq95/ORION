@@ -3,5 +3,7 @@ install/
 log/
 frames_*
 map/
-autonomousNav/
 mapper_node_ground_truth.py
+simple_robot_description/config/nav2_params.yaml
+simple_robot_description/config/slam_toolbox_params.yaml
+assets/
