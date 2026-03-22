@@ -16,16 +16,19 @@ class ExtendedKalmanFilterNode(Node):
         # State covariance matrix (3x3) 
         self.P = np.eye(3) * 1.0
          
-        # ===== PROCESS NOISE (How much we trust the velocity motion model) ===== 
-        self.declare_parameter('process_noise_xy', 0.15)       
+        # ===== PROCESS NOISE (How much we trust the velocity motion model) =====  
+        # self.declare_parameter('process_noise_xy', 0.15)       
+        # self.declare_parameter('process_noise_yaw', 0.5)      
+        # self.declare_parameter('imu_heading_noise', 0.05)     
+
+        self.declare_parameter('process_noise_xy', 0.1)       
         self.declare_parameter('process_noise_yaw', 0.5)      
-         
-        # ===== MEASUREMENT NOISE (Sensor uncertainty) ===== 
-        self.declare_parameter('imu_heading_noise', 0.05)
-         
-        process_xy = self.get_parameter('process_noise_xy').value 
-        process_yaw = self.get_parameter('process_noise_yaw').value 
-        self.R_imu = self.get_parameter('imu_heading_noise').value 
+        self.declare_parameter('imu_heading_noise', 0.05)     
+
+        # higher = less trust
+        process_xy = self.get_parameter('process_noise_xy').value # wheel odom for position trust 
+        process_yaw = self.get_parameter('process_noise_yaw').value # wheel odometry for yaw trust
+        self.R_imu = self.get_parameter('imu_heading_noise').value # imu yaw trust
          
         # Variance of the motion model per second 
         self.Q = np.array([ 
@@ -44,7 +47,7 @@ class ExtendedKalmanFilterNode(Node):
         # Publisher for fused odometry 
         self.fused_odom_pub = self.create_publisher(Odometry, '/odom_fused', 10) 
          
-        self.get_logger().info('EKF Node started (LiDAR Velocities + IMU Yaw).') 
+        self.get_logger().info('EKF Node started (Wheel Odometry + IMU Yaw).') 
      
     def quaternion_to_yaw(self, qx, qy, qz, qw): 
         siny_cosp = 2 * (qw * qz + qx * qy) 
@@ -62,7 +65,7 @@ class ExtendedKalmanFilterNode(Node):
         return angle 
 
     def prediction_callback(self, msg): 
-        """ PREDICTION STEP: Driven by LiDAR Velocities (Twist) to eliminate wheel slip """ 
+        """ PREDICTION STEP: Driven by Wheel Odometry Velocities (Twist) """ 
         current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 
          
         if self.last_odom_time is None: 
@@ -82,14 +85,15 @@ class ExtendedKalmanFilterNode(Node):
         if dt <= 0.0: 
             return 
 
-        # Extract local velocities from LiDAR odometry
+        # Extract local velocities from wheel odometry
         vx = msg.twist.twist.linear.x 
-        vy = msg.twist.twist.linear.y  # Incorporating lateral slip/drift
-        omega = msg.twist.twist.angular.z 
+        vy = msg.twist.twist.linear.y 
+        omega = msg.twist.twist.angular.z
          
         # Predict State using Runge-Kutta 2nd order (Midpoint method)
         yaw_k = self.state[2] 
         avg_yaw = yaw_k + (omega * dt / 2.0) 
+        # self.get_logger().info(f'yaw: {avg_yaw}')
          
         # Update the motion model to include vy
         delta_x = (vx * math.cos(avg_yaw) - vy * math.sin(avg_yaw)) * dt 

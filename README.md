@@ -51,7 +51,7 @@ ros2 run simple_robot_control robot_subscriber(W,S,A,D control).
 ### Start Extended Kalman Filter Node
 
 ```sh
-ros2 run simple_robot_control ekf_node
+ros2 run simple_robot_control ekf_node --ros-args --params-file simple_robot_description/config/ekf_params.yaml
 ```
 
 ### Start Mapper Node
