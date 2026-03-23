@@ -1,6 +1,6 @@
 ekf_node:
   ros__parameters:
-    process_noise_vx: 0.1
-    process_noise_vy: 0.01 # wheel odometry trust
-    process_noise_yaw: 0.5 # wheel odometry for yaw trust
+    process_noise_vx: 0.25
+    process_noise_vy: 0.1 # wheel odometry trust
+    process_noise_yaw: 0.4 # wheel odometry for yaw trust
     imu_heading_noise: 0.05 # imu for yaw trust
