@@ -13,7 +13,6 @@ install(DIRECTORY
   urdf
   launch
   config
-  meshes
   models
   photos
   worlds
