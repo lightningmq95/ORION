@@ -451,6 +451,17 @@
     </sensor>
   </gazebo>
 
+   <!-- Pose Publisher Plugin (for ground truth) -->
+  <gazebo>
+    <plugin filename="libignition-gazebo-pose-publisher-system.so" 
+            name="ignition::gazebo::systems::PosePublisher">
+      <publish_link_pose>false</publish_link_pose>
+      <publish_model_pose>true</publish_model_pose>
+      <publish_nested_model_pose>false</publish_nested_model_pose>
+      <update_frequency>50</update_frequency>
+    </plugin>
+  </gazebo>
+
   <!-- Base Footprint (for navigation) -->
   <link name="base_footprint"/>
   

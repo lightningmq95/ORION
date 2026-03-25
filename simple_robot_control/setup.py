@@ -23,7 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'robot_subscriber = simple_robot_control.robot_subscriber:main',
-            'ground_truth = simple_robot_control.ground_truth_node:main',
+            'ground_truth_node = simple_robot_control.ground_truth_node:main',
             'mapper_node = simple_robot_control.mapper_node:main',
             'ekf_node = simple_robot_control.extended_kalman_filter:main',
             'frontier_explorer = simple_robot_control.frontier_explorer:main',

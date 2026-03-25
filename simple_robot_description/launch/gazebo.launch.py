@@ -194,19 +194,23 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Bridge for Ground Truth Pose (Gazebo->ROS uses [)
+     # Bridge for ground truth poses
     bridge_ground_truth = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/model/simple_robot/pose@geometry_msgs/msg/PoseArray[gz.msgs.Pose_V',
-        ],
-        remappings=[
-            ('/model/simple_robot/pose', '/ground_truth'),
+            '/world/default/dynamic_pose/info@tf2_msgs/msg/TFMessage[ignition.msgs.Pose_V',
         ],
         output='screen'
     )
 
+    ground_truth_node = Node(
+        package='simple_robot_control',
+        executable='ground_truth_node',
+        parameters=[{'robot_name': 'simple_robot'}],
+        output='screen'
+    )
+    
     return LaunchDescription([
         gazebo_resource_path,
         world_name_arg,
@@ -225,5 +229,6 @@ def generate_launch_description():
         bridge_cmd_vel,
         bridge_clock,
         bridge_tf,
-        bridge_ground_truth
+        bridge_ground_truth,
+        ground_truth_node,
     ])
