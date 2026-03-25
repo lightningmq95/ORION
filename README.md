@@ -9,13 +9,14 @@ colcon build
 ### Launch the Simulation
 
 Source the workspace everytime you open a new terminal.
-If using bash use:
+
+If using bash run:
 
 ```sh
 source install/setup.bash
 ```
 
-If using zsh use:
+If using zsh run:
 
 ```sh
 source install/setup.zsh
