@@ -49,7 +49,7 @@ class SimpleMapperNode(Node):
         )
 
         self.odom_sub = message_filters.Subscriber(self, Odometry, '/odom_fused')
-        self.lidar_sub = message_filters.Subscriber(self, LaserScan, '/lidar_squashed', qos_profile=sensor_qos)
+        self.lidar_sub = message_filters.Subscriber(self, LaserScan, '/lidar_2d_scan', qos_profile=sensor_qos)
         
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.odom_sub, self.lidar_sub], queue_size=20, slop=0.02

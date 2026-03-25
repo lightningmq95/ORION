@@ -2,11 +2,7 @@ build/
 install/
 log/
 frames_*
-map/
-mapper_node_ground_truth.py
-simple_robot_description/config/nav2_params.yaml
-simple_robot_description/config/slam_toolbox_params.yaml
-assets/
 simple_robot_control/simple_robot_control/frontier_explorer.py
 simple_robot_control/simple_robot_control/path_planner.py
 simple_robot_control/simple_robot_control/pure_pursuit.py
+simple_robot_description/launch/autonomous_nav.launch.py
