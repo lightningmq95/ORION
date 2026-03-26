@@ -31,11 +31,26 @@ class SimpleMapperNode(Node):
         self.grid_msg.info.origin.position.y = -(self.height * self.resolution) / 2.0
         self.grid_msg.info.origin.orientation.w = 1.0
 
+        # self.L_OCC -> Log-odds increment applied when a LiDAR ray endpoint detects an obstacle.
+                    #   Higher value → cells become occupied faster (more confident obstacle detection).    
+        # self.L_FREE -> Log-odds increment applied when a LiDAR ray endpoint detects an obstacle.
+                    #   Higher value → cells become occupied faster (more confident obstacle detection). 
+        # self.MAX_LOG_ODDS -> Upper saturation limit for log-odds belief.
+                            # Prevents occupancy confidence from growing indefinitely and helps
+                            # remove stale obstacles ("ghosting") when environment changes.
+        # self.MIN_LOG_ODDS -> Lower saturation limit for log-odds belief.
+                            # Prevents free-space confidence from becoming excessively strong,
+                            # allowing obstacles to be re-detected if environment changes.
+        # self.OCC_THRESHOLD -> Threshold above which a grid cell is classified as OCCUPIED.
+                            # Increasing this → map becomes more conservative (fewer false obstacles).
+        # self.FREE_THRESHOLD -> Threshold below which a grid cell is classified as FREE.
+                            # Decreasing this → free space is declared more aggressively.
+
         # Log-Odds tuning parameters 
         # Tighter bounds = faster response to dynamic changes
         self.L_OCC = 0.85          
         self.L_FREE = -0.4         
-        self.MAX_LOG_ODDS = 3.5    # Reduced from 5.0 for sharper erasing of ghosts
+        self.MAX_LOG_ODDS = 3.5
         self.MIN_LOG_ODDS = -3.5  
         self.OCC_THRESHOLD = 0.8   
         self.FREE_THRESHOLD = -0.3 

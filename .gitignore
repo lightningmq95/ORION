@@ -6,3 +6,4 @@ simple_robot_control/simple_robot_control/frontier_explorer.py
 simple_robot_control/simple_robot_control/path_planner.py
 simple_robot_control/simple_robot_control/pure_pursuit.py
 simple_robot_description/launch/autonomous_nav.launch.py
+simple_robot_control/simple_robot_control/vizualization.py

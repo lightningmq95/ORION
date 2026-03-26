@@ -28,6 +28,7 @@ setup(
             'ekf_node = simple_robot_control.extended_kalman_filter:main',
             'frontier_explorer = simple_robot_control.frontier_explorer:main',
             'pure_pursuit = simple_robot_control.pure_pursuit:main',
+            'vizualize_matplotlib = simple_robot_control.vizualize_matplotlib:main'
         ],
     },
 )
