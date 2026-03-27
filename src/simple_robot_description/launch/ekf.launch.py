@@ -15,4 +15,11 @@ def generate_launch_description():
         parameters=[params_file, {'use_sim_time': True}],
     )
 
-    return LaunchDescription([ekf_node])
+    vizualize = Node(
+        package='simple_robot_control',
+        executable='vizualize_matplotlib',
+        name='odom_visualizer',
+        output='screen',
+    )
+
+    return LaunchDescription([ekf_node, vizualize])
