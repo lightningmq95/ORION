@@ -32,7 +32,7 @@ You can specify a world with:
 ros2 launch simple_robot_description gazebo.launch.py world_name:=simple_world/small_house/small_warehouse
 ```
 
-### Start Extended Kalman Filter Node
+### Start Extended Kalman Filter and Vizualisation Node
 
 ```sh
 ros2 launch simple_robot_description ekf.launch.py

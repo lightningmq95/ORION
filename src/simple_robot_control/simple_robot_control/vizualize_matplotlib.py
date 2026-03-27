@@ -173,13 +173,13 @@ class OdomVisualizer(Node):
             cv2.line(img, p1, p2, (255,0,0), 2)
 
         # legend
-        cv2.putText(img, "RED = RAW ODOM", (10,20),
+        cv2.putText(img, "RED -> RAW ODOM", (10,20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
 
-        cv2.putText(img, "GREEN = EKF", (10,45),
+        cv2.putText(img, "GREEN -> EKF", (10,45),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,200,0), 2)
 
-        cv2.putText(img, "BLUE = GROUND TRUTH", (10,70),
+        cv2.putText(img, "BLUE -> GROUND TRUTH", (10,70),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
 
         cv2.putText(img, f"Scale: {self.current_scale:.2f} px/m", (10,100),
