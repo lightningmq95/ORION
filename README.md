@@ -66,4 +66,4 @@ ros2 launch simple_robot_description autonomous_nav.launch.py
 ros2 run simple_robot_control robot_subscriber
 ```
 
-#### Run ros2 topic list to see the available topics from the simulation which you can use to access camera, odometry, lidar data, etc.
+Run ros2 topic list to see the available topics from the simulation which you can use to access camera, odometry, lidar data, etc.
