@@ -2,8 +2,8 @@ build/
 install/
 log/
 frames_*
-src/simple_robot_control/simple_robot_control/frontier_explorer.py
-src/simple_robot_control/simple_robot_control/path_planner.py
-src/simple_robot_control/simple_robot_control/pure_pursuit.py
-src/simple_robot_description/launch/autonomous_nav.launch.py
+# src/simple_robot_control/simple_robot_control/frontier_explorer.py
+# src/simple_robot_control/simple_robot_control/path_planner.py
+# src/simple_robot_control/simple_robot_control/pure_pursuit.py
+# src/simple_robot_description/launch/autonomous_nav.launch.py
 src/simple_robot_control/simple_robot_control/mapper_node_posegraph.py
