@@ -54,10 +54,16 @@ rviz2
 
 Go to Add -> By Topic -> /map
 
-### Run Robot Control Node
+### Start Autonomous traversal Node with Frontier Exploration
 
 ```sh
-ros2 run simple_robot_control robot_subscriber(W,S,A,D control).
-
-# Run ros2 topic list (to find available topics from the simulation which you can use to access camera and other things.)
+ros2 launch simple_robot_description autonomous_nav.launch.py
 ```
+
+### Run Robot Control Node (Manual Control using W,S,A,D (optional))
+
+```sh
+ros2 run simple_robot_control robot_subscriber
+```
+
+#### Run ros2 topic list to see the available topics from the simulation which you can use to access camera, odometry, lidar data, etc.
