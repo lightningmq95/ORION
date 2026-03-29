@@ -21,13 +21,13 @@ class Frontier:
 class FrontierExplorer(Node):
 
     # ── tuning ──────────────────────────────────────────────────────
-    GOAL_REACHED_DIST   = 0.5   # m
-    REPLAN_COOLDOWN_S   = 3.0   # s
-    CURRENT_GOAL_BONUS  = 0.60  
-    MIN_FRONTIER_SIZE   = 8
-    NUM_EXPLORE_FAILS   = 15    # Reduced so it heads home quicker when done
-    TOP_K_FRONTIERS     = 30    
-    GOAL_TIMEOUT_S      = 30.0  
+    GOAL_REACHED_DIST   = 0.5   # metres; a margin given to a pose to mark it as reached
+    REPLAN_COOLDOWN_S   = 3.0   # in seconds; Min cooldown time to look for new goals
+    CURRENT_GOAL_BONUS  = 0.60  # A bonus given to the bot when it reaches a goal pose
+    MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier
+    NUM_EXPLORE_FAILS   = 15    # After max explore failures it concludes that the map is fully explored and returns home
+    TOP_K_FRONTIERS     = 30    # detected 100 frontiers, it chooses top K to reduce CPU load
+    GOAL_TIMEOUT_S      = 30.0  # if robot is trying to reach the current goal and cant reach it, after GOAL_TIMEOUT_S time it will give up, blacklist that goal and forces a replan to somewhere else
     # ────────────────────────────────────────────────────────────────
 
     def __init__(self):

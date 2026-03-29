@@ -37,7 +37,7 @@ class SimpleMapperNode(Node):
         self.inflated_grid_msg = copy.deepcopy(self.grid_msg)
 
         # --- Obstacle Inflation (Blobbing) Settings ---
-        self.inflation_radius_m = 0.05 # Inflate obstacles by 5 cm (adjust as needed)
+        self.inflation_radius_m = 0.15 # Inflate obstacles by 5 cm (adjust as needed)
         
         # Calculate kernel size based on resolution. Must be an odd number.
         kernel_size = int((self.inflation_radius_m / self.resolution) * 2) + 1

@@ -118,7 +118,7 @@ class PathPlanner:
 
     @staticmethod
     def calc_cspace(mapdata: OccupancyGrid):
-        KERNEL_SIZE = 21
+        KERNEL_SIZE = 15
         
         width = mapdata.info.width
         height = mapdata.info.height
@@ -168,7 +168,7 @@ class PathPlanner:
 
     @staticmethod
     def a_star(mapdata, cost_map, start, goal):
-        COST_MAP_WEIGHT = 1000
+        COST_MAP_WEIGHT = 100 # additional penalty to stay away from walls
         if not PathPlanner.is_cell_walkable(mapdata, start): return (None, None, start, goal)
         if not PathPlanner.is_cell_walkable(mapdata, goal): return (None, None, start, goal)
 
