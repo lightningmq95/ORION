@@ -23,7 +23,7 @@ class FrontierExplorer(Node):
     # ── tuning ──────────────────────────────────────────────────────
     GOAL_REACHED_DIST   = 0.5   # metres; a margin given to a pose to mark it as reached
     REPLAN_COOLDOWN_S   = 3.0   # in seconds; Min cooldown time to look for new goals
-    CURRENT_GOAL_BONUS  = 0.60  # A bonus given to the bot when it reaches a goal pose
+    CURRENT_GOAL_BONUS  = 0.70  # A bonus given to the bot when it reaches a goal pose
     MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier
     NUM_EXPLORE_FAILS   = 15    # After max explore failures it concludes that the map is fully explored and returns home
     TOP_K_FRONTIERS     = 30    # detected 100 frontiers, it chooses top K to reduce CPU load
@@ -43,14 +43,15 @@ class FrontierExplorer(Node):
         self.mapdata    = None
 
         # ── state management ────────────────────────────────────────
-        self.initial_pose: Point | None = None           # Remembers starting location
-        self.returning_home = False                      # Flags when exploration is over
+        self.initial_pose: Point | None = None           
+        self.returning_home = False                      
         
         self.current_goal_centroid: Point | None = None  
         self.last_replan_time = self.get_clock().now()
         self.goal_start_time  = self.get_clock().now()
         self.no_frontiers_found_counter = 0
         self.is_finished_exploring = False
+        self.return_home_fails = 0 # NEW: Tracks fails when trying to go home
         
         self.blacklisted_centroids = []
 
@@ -61,7 +62,6 @@ class FrontierExplorer(Node):
 
     def odom_callback(self, msg: Odometry):
         self.pose = msg.pose.pose
-        # Capture the starting location the first time we get odometry
         if self.initial_pose is None:
             self.initial_pose = Point()
             self.initial_pose.x = self.pose.position.x
@@ -155,12 +155,18 @@ class FrontierExplorer(Node):
             return
 
         start_cell = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
-        cspace   = PathPlanner.calc_cspace(self.mapdata)
+        
+        # --- NEW: Dynamic C-Space Shrinking Logic ---
+        current_kernel = 15 # adjust this accordingly
+        if self.returning_home and self.return_home_fails > 0:
+            # Shrink by 2 for every failure to keep it an odd number.
+            # Sequence: 21 -> 19 -> 17 -> 15 -> 13 -> 11
+            current_kernel = max(1, 21 - (self.return_home_fails * 2))
+            
+        cspace   = PathPlanner.calc_cspace(self.mapdata, kernel_size=current_kernel)
         cost_map = PathPlanner.calc_cost_map(self.mapdata)
 
         # --- Escape the A* Start Trap ---
-        # If the robot is slightly inside an inflated obstacle margin, 
-        # A* will abort. Shift the start_cell to the nearest free space.
         if not PathPlanner.is_cell_walkable(cspace, start_cell):
             found_start = False
             for r in range(1, 15): 
@@ -186,7 +192,6 @@ class FrontierExplorer(Node):
 
             home_cell = PathPlanner.world_to_grid(self.mapdata, self.initial_pose)
             
-            # Ensure the home cell wasn't swallowed by C-Space inflation
             if not PathPlanner.is_cell_walkable(cspace, home_cell):
                 found_home = False
                 for r in range(1, 15):
@@ -205,10 +210,21 @@ class FrontierExplorer(Node):
             path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, home_cell)
 
             if path:
+                if self.return_home_fails > 0:
+                    self.get_logger().info(f"Squeeze successful! Path found with reduced C-Space (Kernel: {current_kernel}).")
+                
+                self.return_home_fails = 0 # Reset fails on success
                 path_msg = PathPlanner.path_to_message(self.mapdata, path, self.get_clock().now().to_msg())
                 self.path_pub.publish(path_msg)
             else:
-                self.get_logger().warn("Cannot find a valid path back home! Retrying...")
+                self.return_home_fails += 1
+                
+                if self.return_home_fails <= 5:
+                    self.get_logger().warn(f"Path home blocked. Shrinking C-Space and retrying ({self.return_home_fails}/5)...")
+                else:
+                    self.get_logger().error("Path completely blocked even with reduced safety margin. Shutting down.")
+                    self.path_pub.publish(Path())
+                    self.is_finished_exploring = True
             return
         # ──────────────────────────────────────────────────────────────
 
@@ -216,14 +232,12 @@ class FrontierExplorer(Node):
         frontiers  = self.search_frontiers(start_cell)
         self._publish_markers(frontiers)
 
-        # ── check if robot has arrived at current goal
         if (self.current_goal_centroid is not None
                 and self._dist_to_point(self.current_goal_centroid) < self.GOAL_REACHED_DIST):
             self.get_logger().info("Reached frontier goal — blacklisting to prevent loops.")
             self.blacklisted_centroids.append(self.current_goal_centroid)
             self.current_goal_centroid = None
 
-        # ── check timeout (stuck prevention)
         if self.current_goal_centroid is not None:
             time_active = (self.get_clock().now() - self.goal_start_time).nanoseconds * 1e-9
             if time_active > self.GOAL_TIMEOUT_S:
@@ -231,18 +245,15 @@ class FrontierExplorer(Node):
                 self.blacklisted_centroids.append(self.current_goal_centroid)
                 self.current_goal_centroid = None
 
-        # ── check if current goal has disappeared from the map
         if not self._goal_still_valid(frontiers):
             if self.current_goal_centroid is not None:
                 self.get_logger().info("Current frontier gone — will replan.")
             self.current_goal_centroid = None
 
-        # ── respect replan cooldown
         if (self.current_goal_centroid is not None
                 and self._seconds_since_replan() < self.REPLAN_COOLDOWN_S):
             return
 
-        # ── pick the best frontier
         top_frontiers = sorted(frontiers, key=lambda f: f.size, reverse=True)[: self.TOP_K_FRONTIERS]
 
         lowest_cost = float('inf')
@@ -250,7 +261,6 @@ class FrontierExplorer(Node):
         best_centroid = None
 
         for f in top_frontiers:
-            # Check Blacklist
             is_blacklisted = False
             for bc in self.blacklisted_centroids:
                 if math.hypot(f.centroid.x - bc.x, f.centroid.y - bc.y) < 1.0:
@@ -261,7 +271,6 @@ class FrontierExplorer(Node):
 
             goal_cell = PathPlanner.world_to_grid(self.mapdata, f.centroid)
             
-            # Strict C-Space check: if it's inside the 21 kernel, it's unreachable
             if not PathPlanner.is_cell_walkable(cspace, goal_cell):
                 continue
 
@@ -282,9 +291,8 @@ class FrontierExplorer(Node):
                 best_path     = path
                 best_centroid = f.centroid
 
-        # ── Evaluate the Cycle Results ──
         if best_path and best_centroid:
-            self.no_frontiers_found_counter = 0  # Reset fail counter since we found a valid goal
+            self.no_frontiers_found_counter = 0  
             if best_centroid != self.current_goal_centroid:
                 self.get_logger().info(f"New frontier goal: ({best_centroid.x:.2f}, {best_centroid.y:.2f})")
             self.current_goal_centroid = best_centroid
@@ -295,16 +303,14 @@ class FrontierExplorer(Node):
                 self.mapdata, best_path, self.get_clock().now().to_msg())
             self.path_pub.publish(path_msg)
         else:
-            # If no paths were found (either 0 frontiers exist, or all are in the 21 kernel/blacklisted)
             self.no_frontiers_found_counter += 1
             if self.no_frontiers_found_counter >= self.NUM_EXPLORE_FAILS:
                 self.get_logger().info("All reachable frontiers discovered! Returning to original position...")
                 self.returning_home = True
                 self.current_goal_centroid = None
-                self._publish_markers([])  # Clear visual frontier markers
+                self._publish_markers([])  
             else:
                 self.get_logger().debug(f"Evaluating remaining frontiers. {self.no_frontiers_found_counter}/{self.NUM_EXPLORE_FAILS} fails before returning home.")
-
 
     # ── marker visualisation ─────────────────────────────────────────
 

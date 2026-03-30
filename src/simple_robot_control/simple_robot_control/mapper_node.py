@@ -36,24 +36,33 @@ class SimpleMapperNode(Node):
         # Create an exact copy of the metadata for the Inflated Map message
         self.inflated_grid_msg = copy.deepcopy(self.grid_msg)
 
-        # --- Obstacle Inflation (Blobbing) Settings ---
-        self.inflation_radius_m = 0.15 # Inflate obstacles by 5 cm (adjust as needed)
+        # ---------------------------------------------------------
+        # --- 1. Obstacle Blobbing (Merging) Settings ---
+        # ---------------------------------------------------------
+        self.obstacle_merge_dist_m = 0.45  
         
-        # Calculate kernel size based on resolution. Must be an odd number.
-        kernel_size = int((self.inflation_radius_m / self.resolution) * 2) + 1
-        if kernel_size % 2 == 0:  # Failsafe to ensure it's odd
-            kernel_size += 1
+        merge_kernel_cells = int(self.obstacle_merge_dist_m / self.resolution)
+        if merge_kernel_cells % 2 == 0:  
+            merge_kernel_cells += 1
             
-        # Create a circular kernel for uniform expansion
-        self.inflation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        self.merge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (merge_kernel_cells, merge_kernel_cells))
+
+        # ---------------------------------------------------------
+        # --- 2. Obstacle Inflation (Safety Radius) Settings ---
+        # ---------------------------------------------------------
+        self.inflation_radius_m = 0.15 
+        
+        inflate_kernel_cells = int((self.inflation_radius_m / self.resolution) * 2) + 1
+        if inflate_kernel_cells % 2 == 0:  
+            inflate_kernel_cells += 1
+            
+        self.inflation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inflate_kernel_cells, inflate_kernel_cells))
 
         # Log-Odds tuning parameters 
         self.L_OCC = 0.85          
         self.L_FREE = -0.4         
         self.MAX_LOG_ODDS = 3.5
         self.MIN_LOG_ODDS = -2.0
-        self.OCC_THRESHOLD = 0.8   
-        self.FREE_THRESHOLD = -0.3 
 
         self.MAX_TRUSTED_RANGE = 10.0 # Truncate long-distance blur
 
@@ -103,7 +112,6 @@ class SimpleMapperNode(Node):
         
         # Valid mask: within min/max, not nan, not infinite.
         valid_mask = (ranges >= scan_msg.range_min) & (ranges <= min(scan_msg.range_max, self.MAX_TRUSTED_RANGE)) & np.isfinite(ranges)
-        # Apply subsampling mask (e.g., take every 2nd valid point) to halve raycasting work
         valid_mask_idx = np.where(valid_mask)[0][::2] 
         
         valid_ranges = ranges[valid_mask_idx]
@@ -122,14 +130,10 @@ class SimpleMapperNode(Node):
         free_space_mask = np.zeros_like(self.log_odds, dtype=np.uint8)
         
         for hx, hy in zip(hit_x_grid, hit_y_grid):
-            # Draw line from robot to hit point with thickness 1
             cv2.line(free_space_mask, (rx_grid, ry_grid), (hx, hy), 1, 1)
 
         # 4. Apply Updates to Map
-        # Decrease log odds for free space (anywhere cv2.line drew a 1)
         self.log_odds[free_space_mask == 1] += self.L_FREE
-        
-        # Overwrite hits. Ensure we add L_OCC correctly by uniquely identifying hit cells
         self.log_odds[hit_y_grid, hit_x_grid] += (abs(self.L_FREE) + self.L_OCC) 
 
         # 5. Fast Vectorized Clipping
@@ -142,24 +146,32 @@ class SimpleMapperNode(Node):
             self.publish_map()
 
     def publish_map(self):
-        # 1. Extract raw occupied and free masks based on thresholds
-        occupied_mask = (self.log_odds > self.OCC_THRESHOLD).astype(np.uint8)
-        free_mask = (self.log_odds < self.FREE_THRESHOLD).astype(np.uint8)
+        # Convert log-odds to probabilities (per your snippet)
+        prob = 1.0 / (1.0 + np.exp(-self.log_odds))
         
-        # 2. DILATION: Grow the obstacles to merge close ones into blobs
-        inflated_occupied = cv2.dilate(occupied_mask, self.inflation_kernel, iterations=1)
+        # 1. Create binary masks for OpenCV processing
+        occupied_mask = (prob > 0.65).astype(np.uint8)
+        free_mask = (prob < 0.35).astype(np.uint8)
         
-        # 3. Construct the RAW map
+        # 2. BLOBBING: Apply Morphological Closing
+        # This dilates the obstacles to connect close points (chair legs), 
+        # then erodes them so walls don't become massively thick.
+        blobbed_occ = cv2.morphologyEx(occupied_mask, cv2.MORPH_CLOSE, self.merge_kernel)
+
+        # 3. DILATION: Apply physical robot safety radius to the merged blocks
+        inflated_occupied = cv2.dilate(blobbed_occ, self.inflation_kernel, iterations=1)
+        
+        # 4. Construct the RAW map
         raw_map = np.full(self.log_odds.shape, -1, dtype=np.int8)
-        raw_map[free_mask == 1] = 0
-        raw_map[occupied_mask == 1] = 100
+        raw_map[free_mask == 1] = 0            # Lay down free space first
+        raw_map[occupied_mask == 1] = 100      # Overwrite with raw obstacles
         
-        # 4. Construct the INFLATED map
+        # 5. Construct the INFLATED map
         inflated_map = np.full(self.log_odds.shape, -1, dtype=np.int8)
         inflated_map[free_mask == 1] = 0
-        inflated_map[inflated_occupied == 1] = 100 # Inflated areas override free space
+        inflated_map[inflated_occupied == 1] = 100 # Overwrite with the fully processed blobs
         
-        # 5. Add timestamps and publish BOTH maps
+        # 6. Add timestamps and publish BOTH maps
         current_time = self.get_clock().now().to_msg()
         
         # Publish Raw

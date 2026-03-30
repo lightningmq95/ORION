@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import math
 import cv2
 import numpy as np
@@ -116,16 +114,16 @@ class PathPlanner:
                 neighbors.append((candidate, distance))
         return neighbors
 
+    # --- UPDATED: Dynamic Kernel Size ---
     @staticmethod
-    def calc_cspace(mapdata: OccupancyGrid):
-        KERNEL_SIZE = 15
+    def calc_cspace(mapdata: OccupancyGrid, kernel_size: int = 21):
         
         width = mapdata.info.width
         height = mapdata.info.height
         
         map_arr = np.array(mapdata.data).reshape(height, width).astype(np.uint8)
         
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (KERNEL_SIZE, KERNEL_SIZE))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         
         unknown_area_mask = cv2.inRange(map_arr, 255, 255)
         unknown_area_mask = cv2.erode(unknown_area_mask, kernel, iterations=1)
