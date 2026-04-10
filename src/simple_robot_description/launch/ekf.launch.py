@@ -17,9 +17,9 @@ def generate_launch_description():
 
     vizualize = Node(
         package='simple_robot_control',
-        executable='vizualize_matplotlib',
+        executable='eval',
         name='odom_visualizer',
+        arguments=['--record', '--output', './runs'],
         output='screen',
     )
-
     return LaunchDescription([ekf_node, vizualize])
