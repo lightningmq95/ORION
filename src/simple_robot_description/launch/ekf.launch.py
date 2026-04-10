@@ -17,7 +17,7 @@ def generate_launch_description():
 
     vizualize = Node(
         package='simple_robot_control',
-        executable='eval',
+        executable='vizualize',
         name='odom_visualizer',
         arguments=['--record', '--output', './runs'],
         output='screen',
