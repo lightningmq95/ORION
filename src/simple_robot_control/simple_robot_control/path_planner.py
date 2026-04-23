@@ -9,6 +9,14 @@ from geometry_msgs.msg import Point, Quaternion, Pose, PoseStamped
 DIRECTIONS_OF_4 = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 DIRECTIONS_OF_8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
+# Pre-computed distances for 8-connected neighbors (avoids sqrt on every call)
+_SQRT2 = math.sqrt(2)
+DIRECTIONS_AND_DISTANCES_OF_8 = [
+    ((-1, -1), _SQRT2), ((-1, 0), 1.0), ((-1, 1), _SQRT2),
+    ((0, -1), 1.0),                      ((0, 1), 1.0),
+    ((1, -1), _SQRT2),  ((1, 0), 1.0),  ((1, 1), _SQRT2),
+]
+
 class PriorityQueue:
     def __init__(self):
         self.elements = []
@@ -107,10 +115,9 @@ class PathPlanner:
     @staticmethod
     def neighbors_and_distances_of_8(mapdata, p, must_be_walkable=True):
         neighbors = []
-        for direction in DIRECTIONS_OF_8:
+        for direction, distance in DIRECTIONS_AND_DISTANCES_OF_8:
             candidate = (p[0] + direction[0], p[1] + direction[1])
             if not must_be_walkable or PathPlanner.is_cell_walkable(mapdata, candidate):
-                distance = PathPlanner.euclidean_distance(direction, (0, 0))
                 neighbors.append((candidate, distance))
         return neighbors
 
@@ -146,27 +153,22 @@ class PathPlanner:
         width = mapdata.info.width
         height = mapdata.info.height
         map_arr = np.array(mapdata.data).reshape(height, width).astype(np.uint8)
-        map_arr[map_arr == 255] = 100
+        map_arr[map_arr == 255] = 100  # treat unknown as obstacle
 
-        cost_map = np.zeros_like(map_arr)
-        dilated_map = map_arr.copy()
-        iterations = 0
-        kernel = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], np.uint8)
-        
-        while np.any(dilated_map == 0) and iterations < 100:
-            iterations += 1
-            next_dilated_map = cv2.dilate(dilated_map, kernel, iterations=1)
-            difference = next_dilated_map - dilated_map
-            difference[difference > 0] = iterations
-            cost_map = cv2.bitwise_or(cost_map, difference)
-            dilated_map = next_dilated_map
+        # Binary mask: free cells = 255, obstacles/unknown = 0
+        free_mask = np.where(map_arr == 0, 255, 0).astype(np.uint8)
 
-        cost_map[cost_map > 0] -= 1
+        # Single-pass distance transform (replaces 100-iteration dilation loop)
+        # DIST_L1 matches the original 4-connected dilation kernel behavior
+        dist = cv2.distanceTransform(free_mask, cv2.DIST_L1, 3)
+
+        # Match original: cap at 100, subtract 1, floor at 0
+        cost_map = np.clip(dist - 1, 0, 99).astype(np.uint8)
         return cost_map
 
     @staticmethod
     def a_star(mapdata, cost_map, start, goal):
-        COST_MAP_WEIGHT = 100 # additional penalty to stay away from walls
+        COST_MAP_WEIGHT = 40 # additional penalty to stay away from walls
         if not PathPlanner.is_cell_walkable(mapdata, start): return (None, None, start, goal)
         if not PathPlanner.is_cell_walkable(mapdata, goal): return (None, None, start, goal)
 
@@ -194,11 +196,12 @@ class PathPlanner:
         path = []
         cell = goal
         while cell:
-            path.insert(0, cell)
+            path.append(cell)
             if cell in came_from:
                 cell = came_from[cell]
             else:
                 return (None, None, start, goal)
+        path.reverse()
 
         if len(path) < 5: 
             return (None, None, start, goal)
