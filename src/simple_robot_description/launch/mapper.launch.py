@@ -8,8 +8,8 @@ def generate_launch_description():
         name='pointcloud_to_laserscan',
         parameters=[{
             'use_sim_time': True,
-            'min_height': 0.05,
-            'max_height': 0.1,
+            'min_height': 0.1,
+            'max_height': 0.3,
             'angle_min': -1.5708,
             'angle_max': 1.5708,
             'range_min': 0.08,
