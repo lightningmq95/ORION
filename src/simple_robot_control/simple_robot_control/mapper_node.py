@@ -23,6 +23,10 @@ class SimpleMapperNode(Node):
         # Bayesian Log-Odds Array
         self.log_odds = np.zeros((self.height, self.width), dtype=np.float32)
         
+        # Permanent obstacle memory: once a cell is confirmed occupied, it stays forever
+        self.confirmed_obstacles = np.zeros((self.height, self.width), dtype=bool)
+        self.CONFIRM_THRESHOLD = 2.0  # log-odds value to lock a cell as permanently occupied
+        
         # Base setup for the Raw Map message
         self.grid_msg = OccupancyGrid()
         self.grid_msg.header.frame_id = 'odom'
@@ -59,9 +63,9 @@ class SimpleMapperNode(Node):
         self.inflation_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (inflate_kernel_cells, inflate_kernel_cells))
 
         # Log-Odds tuning parameters 
-        self.L_OCC = 0.85          
-        self.L_FREE = -0.4         
-        self.MAX_LOG_ODDS = 3.5
+        self.L_OCC = 1.2           # Evidence per occupied hit (detect quickly)
+        self.L_FREE = -0.15        # Evidence per free ray-through (erode slowly to preserve memory)
+        self.MAX_LOG_ODDS = 5.0    # Higher cap = obstacles need many ray-throughs to erase
         self.MIN_LOG_ODDS = -2.0
 
         self.MAX_TRUSTED_RANGE = 10.0 # Truncate long-distance blur
@@ -133,11 +137,16 @@ class SimpleMapperNode(Node):
             cv2.line(free_space_mask, (rx_grid, ry_grid), (hx, hy), 1, 1)
 
         # 4. Apply Updates to Map
-        self.log_odds[free_space_mask == 1] += self.L_FREE
+        # Only apply free-space decay to cells that are NOT permanently confirmed obstacles
+        free_update_cells = (free_space_mask == 1) & (~self.confirmed_obstacles)
+        self.log_odds[free_update_cells] += self.L_FREE
         self.log_odds[hit_y_grid, hit_x_grid] += (abs(self.L_FREE) + self.L_OCC) 
 
         # 5. Fast Vectorized Clipping
         np.clip(self.log_odds, self.MIN_LOG_ODDS, self.MAX_LOG_ODDS, out=self.log_odds)
+        
+        # 6. Lock cells that have crossed the confirmed threshold
+        self.confirmed_obstacles |= (self.log_odds >= self.CONFIRM_THRESHOLD)
 
         # 6. Publish Map
         self.publish_counter += 1
