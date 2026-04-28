@@ -27,8 +27,8 @@ class FrontierExplorer(Node):
     MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier
     NUM_EXPLORE_FAILS   = 15    # After max explore failures it concludes that the map is fully explored and returns home
     TOP_K_FRONTIERS     = 10     # detected 100 frontiers, it chooses top K to reduce CPU load
-    GOAL_TIMEOUT_S      = 40.0  # if robot is trying to reach the current goal and cant reach it, after GOAL_TIMEOUT_S time it will give up, blacklist that goal and forces a replan to somewhere else
-    DEFAULT_KERNEL_SIZE = 12    # Cspace thickness
+    GOAL_TIMEOUT_S      = 15.0  # if robot is trying to reach the current goal and cant reach it, after GOAL_TIMEOUT_S time it will give up, blacklist that goal and forces a replan to somewhere else
+    DEFAULT_KERNEL_SIZE = 18    # Cspace thickness
     # ────────────────────────────────────────────────────────────────
 
     def __init__(self):
@@ -201,7 +201,7 @@ class FrontierExplorer(Node):
             if not PathPlanner.is_cell_in_bounds(self.mapdata, cell):
                 return True
             val = PathPlanner.get_cell_value(self.mapdata, cell)
-            if val >= 50 or val < 0:  # occupied or unknown
+            if val >= 50:  # only actual obstacles block the path (not unknown cells)
                 return True
         return False
 
@@ -213,18 +213,39 @@ class FrontierExplorer(Node):
 
         start_cell = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
 
-        # --- Quick check: skip expensive computation if we're in cooldown ---
-        # (Only applies during normal exploration, not user-goal or return-home)
-        # BUT: always bypass cooldown if the current path is blocked by a new obstacle.
+        # --- Commit to current frontier goal ---
+        # Check if we've reached/timed out the goal, or if path is blocked.
+        # If goal is still valid and path is clear, skip expensive replan.
         if (self.user_goal_centroid is None
                 and not self.returning_home
-                and self.current_goal_centroid is not None
-                and self._seconds_since_replan() < self.REPLAN_COOLDOWN_S):
-            if not self._is_path_blocked():
+                and self.current_goal_centroid is not None):
+            
+            # Check: did we reach the goal?
+            if self._dist_to_point(self.current_goal_centroid) < self.GOAL_REACHED_DIST:
+                self.get_logger().info("Reached frontier goal — blacklisting to prevent loops.")
+                self.blacklisted_centroids.append(self.current_goal_centroid)
+                self.current_goal_centroid = None
+                self.current_path = []
+                # Fall through to pick a new goal
+            
+            # Check: has the goal timed out?
+            elif (self.get_clock().now() - self.goal_start_time).nanoseconds * 1e-9 > self.GOAL_TIMEOUT_S:
+                self.get_logger().warn("Goal timeout (stuck). Blacklisting and replanning.")
+                self.blacklisted_centroids.append(self.current_goal_centroid)
+                self.current_goal_centroid = None
+                self.current_path = []
+                # Fall through to pick a new goal
+            
+            # Check: is the path blocked by a new obstacle?
+            elif self._is_path_blocked():
+                self.get_logger().warn("Obstacle detected on path! Forcing immediate replan.")
+                self.current_goal_centroid = None
+                self.current_path = []
+                # Fall through to replan
+            
+            else:
+                # Goal is active, path is clear — keep going, skip replan
                 return
-            self.get_logger().warn("Obstacle detected on path! Forcing immediate replan.")
-            self.current_goal_centroid = None
-            self.current_path = []
         
         # Calculate C-Space using the locked active_kernel
         cspace   = PathPlanner.calc_cspace(self.mapdata, kernel_size=self.active_kernel)
@@ -248,7 +269,49 @@ class FrontierExplorer(Node):
 
         # ── MANUAL USER GOAL STATE ────────────────────────────────────
         if self.user_goal_centroid is not None:
-            if self._dist_to_point(self.user_goal_centroid) < self.GOAL_REACHED_DIST:
+            # --- Safety Check: Reject goals placed directly inside known obstacles ---
+            raw_goal_cell = PathPlanner.world_to_grid(self.mapdata, self.user_goal_centroid)
+            if (PathPlanner.is_cell_in_bounds(self.mapdata, raw_goal_cell)
+                    and PathPlanner.get_cell_value(self.mapdata, raw_goal_cell) >= 50):
+                self.get_logger().error(
+                    "Manual goal is inside a known obstacle! Rejecting.")
+                self.current_path = []
+                self.path_pub.publish(Path())
+                self.user_goal_centroid = None
+                self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                self.user_goal_fails = 0
+                return
+
+            # --- Nudge goal to nearest walkable cell in C-space ---
+            goal_cell = raw_goal_cell
+            if not PathPlanner.is_cell_walkable(cspace, goal_cell):
+                found_goal = False
+                for r in range(1, 15):
+                    for dx in range(-r, r + 1):
+                        for dy in range(-r, r + 1):
+                            if abs(dx) == r or abs(dy) == r:
+                                cand = (goal_cell[0] + dx, goal_cell[1] + dy)
+                                if PathPlanner.is_cell_walkable(cspace, cand):
+                                    goal_cell = cand
+                                    found_goal = True
+                                    break
+                            if found_goal: break
+                        if found_goal: break
+                    if found_goal: break
+                if not found_goal:
+                    self.get_logger().error(
+                        "No walkable cell near manual goal! Rejecting.")
+                    self.current_path = []
+                    self.path_pub.publish(Path())
+                    self.user_goal_centroid = None
+                    self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                    self.user_goal_fails = 0
+                    return
+
+            # Use the nudged world position for reach-distance checks
+            nudged_goal_world = PathPlanner.grid_to_world(self.mapdata, goal_cell)
+
+            if self._dist_to_point(nudged_goal_world) < self.GOAL_REACHED_DIST:
                 self.get_logger().info("Manual waypoint reached!")
                 self.current_path = []
                 self.path_pub.publish(Path())
@@ -283,41 +346,25 @@ class FrontierExplorer(Node):
                 
                 return
 
-            goal_cell = PathPlanner.world_to_grid(self.mapdata, self.user_goal_centroid)
-            
-            if not PathPlanner.is_cell_walkable(cspace, goal_cell):
-                found_goal = False
-                for r in range(1, 15):
-                    for dx in range(-r, r + 1):
-                        for dy in range(-r, r + 1):
-                            if abs(dx) == r or abs(dy) == r:
-                                cand = (goal_cell[0] + dx, goal_cell[1] + dy)
-                                if PathPlanner.is_cell_walkable(cspace, cand):
-                                    goal_cell = cand
-                                    found_goal = True
-                                    break
-                            if found_goal: break
-                        if found_goal: break
-                    if found_goal: break
-
             path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, goal_cell)
 
             if path:
-                self.user_goal_fails = 0 # Reset fails, but KEEP active_kernel reduced
+                self.user_goal_fails = 0
                 self.current_path = path
                 path_msg = PathPlanner.path_to_message(self.mapdata, path, self.get_clock().now().to_msg())
                 self.path_pub.publish(path_msg)
             else:
                 self.user_goal_fails += 1
-                if self.user_goal_fails <= 5:
-                    self.active_kernel = max(1, self.active_kernel - 2)
-                    self.get_logger().warn(f"Path to manual goal blocked. Shrinking C-Space to {self.active_kernel} ({self.user_goal_fails}/5)...")
+                if self.user_goal_fails <= 3:
+                    self.get_logger().warn(
+                        f"Path to manual goal blocked ({self.user_goal_fails}/3). Retrying...")
                 else:
-                    self.get_logger().error("Manual goal is entirely unreachable! Cancelling command.")
+                    self.get_logger().error("Manual goal is unreachable! Cancelling command.")
                     self.current_path = []
                     self.path_pub.publish(Path())
                     self.user_goal_centroid = None
-                    self.active_kernel = self.DEFAULT_KERNEL_SIZE # Reset if we give up
+                    self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                    self.user_goal_fails = 0
             return 
         # ──────────────────────────────────────────────────────────────
 
@@ -381,31 +428,13 @@ class FrontierExplorer(Node):
         frontiers  = self.search_frontiers(start_cell)
         self._publish_markers(frontiers)
 
-        if (self.current_goal_centroid is not None
-                and self._dist_to_point(self.current_goal_centroid) < self.GOAL_REACHED_DIST):
-            self.get_logger().info("Reached frontier goal — blacklisting to prevent loops.")
-            self.blacklisted_centroids.append(self.current_goal_centroid)
-            self.current_goal_centroid = None
-            self.last_replan_time = self.get_clock().now() - rclpy.duration.Duration(seconds=self.REPLAN_COOLDOWN_S + 1)
-
-        if self.current_goal_centroid is not None:
-            time_active = (self.get_clock().now() - self.goal_start_time).nanoseconds * 1e-9
-            if time_active > self.GOAL_TIMEOUT_S:
-                self.get_logger().warn("Goal timeout (stuck). Blacklisting and replanning.")
-                self.blacklisted_centroids.append(self.current_goal_centroid)
-                self.current_goal_centroid = None
-                self.last_replan_time = self.get_clock().now() - rclpy.duration.Duration(seconds=self.REPLAN_COOLDOWN_S + 1)
-
+        # If we still have a goal but its frontier disappeared, clear it
         if not self._goal_still_valid(frontiers):
             if self.current_goal_centroid is not None:
                 self.get_logger().info("Current frontier gone — will replan.")
             self.current_goal_centroid = None
 
-        # NOTE: The main cooldown early-exit is now at the top of explore_loop()
-        # to avoid redundant cspace/cost_map computation. This is kept as a fallback.
-        if (self.current_goal_centroid is not None
-                and self._seconds_since_replan() < self.REPLAN_COOLDOWN_S):
-            return
+        # We only reach here when current_goal_centroid is None (need a new goal)
 
         top_frontiers = sorted(frontiers, key=lambda f: f.size, reverse=True)[: self.TOP_K_FRONTIERS]
 

@@ -9,12 +9,12 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': True,
             'min_height': 0.1,
-            'max_height': 0.3,
+            'max_height': 0.5,
             'angle_min': -1.5708,
             'angle_max': 1.5708,
             'range_min': 0.08,
             'range_max': 10.0,
-            'angle_increment': 0.0087,
+            'angle_increment': 0.005,
             'scan_time': 0.1,
         }],
         remappings=[

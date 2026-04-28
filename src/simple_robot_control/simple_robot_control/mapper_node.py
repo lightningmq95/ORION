@@ -43,7 +43,7 @@ class SimpleMapperNode(Node):
         # ---------------------------------------------------------
         # --- 1. Obstacle Blobbing (Merging) Settings ---
         # ---------------------------------------------------------
-        self.obstacle_merge_dist_m = 0.45  
+        self.obstacle_merge_dist_m = 0.25 # 0.25
         
         merge_kernel_cells = int(self.obstacle_merge_dist_m / self.resolution)
         if merge_kernel_cells % 2 == 0:  

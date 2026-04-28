@@ -6,6 +6,8 @@ from rclpy.node import Node
 import numpy as np
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import Point, Twist, Vector3
+from sensor_msgs.msg import LaserScan
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 # Import the utility from your package
 from simple_robot_control.path_planner import PathPlanner
@@ -47,6 +49,19 @@ class PurePursuit(Node):
         # --- NEW: Hysteresis state variable ---
         self.is_spinning = False
 
+        # --- Reactive LiDAR Safety Layer (bypasses map update latency) ---
+        self.EMERGENCY_STOP_DISTANCE = 0.20  # meters — full stop
+        self.SLOW_DOWN_DISTANCE = 0.50       # meters — begin speed reduction
+        self.FRONT_ARC_DEGREES = 60          # ±60° from forward heading
+        self.min_front_range = float("inf")
+
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
+        )
+        self.create_subscription(LaserScan, '/lidar_2d_scan', self.update_lidar, sensor_qos)
+
         self.timer = self.create_timer(0.05, self.run_step)
         self.get_logger().info("Pure Pursuit Started.")
 
@@ -58,6 +73,19 @@ class PurePursuit(Node):
 
     def update_path(self, msg: Path):
         self.path = msg
+
+    def update_lidar(self, msg: LaserScan):
+        """Extract minimum range in the front arc for emergency collision avoidance."""
+        ranges = np.array(msg.ranges)
+        angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
+        angles = (angles + np.pi) % (2 * np.pi) - np.pi  # normalize to [-pi, pi]
+
+        arc_rad = np.radians(self.FRONT_ARC_DEGREES)
+        front_mask = np.abs(angles) <= arc_rad
+        valid_mask = (ranges >= msg.range_min) & (ranges <= msg.range_max) & np.isfinite(ranges)
+
+        combined = front_mask & valid_mask
+        self.min_front_range = float(np.min(ranges[combined])) if np.any(combined) else float("inf")
 
     def distance(self, x0, y0, x1, y1):
         return math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
@@ -171,9 +199,21 @@ class PurePursuit(Node):
             # Only add the obstacle avoidance repulsion force when driving forward
             turn_speed += self.calculate_steering_adjustment()
             
-            # Slow down if approaching a wall
-            if self.closest_distance < 0.7:
+            # Slow down if approaching a wall (map-based, secondary layer)
+            # closest_distance is in grid cells (1 cell = 0.05m resolution)
+            if self.closest_distance < 10:  # ~0.5m from inflated wall boundary
                 drive_speed *= 0.5 
+
+        # --- LiDAR Emergency Reactive Layer ---
+        # Directly uses raw LiDAR to prevent collisions with newly discovered
+        # obstacles that haven't been mapped yet (bypasses map update latency).
+        if drive_speed > 0:
+            if self.min_front_range < self.EMERGENCY_STOP_DISTANCE:
+                drive_speed = 0.0
+            elif self.min_front_range < self.SLOW_DOWN_DISTANCE:
+                speed_factor = (self.min_front_range - self.EMERGENCY_STOP_DISTANCE) / \
+                               (self.SLOW_DOWN_DISTANCE - self.EMERGENCY_STOP_DISTANCE)
+                drive_speed *= max(0.15, speed_factor)
 
         turn_speed = max(-self.MAX_TURN_SPEED, min(self.MAX_TURN_SPEED, turn_speed))
         self.send_speed(drive_speed, turn_speed)
