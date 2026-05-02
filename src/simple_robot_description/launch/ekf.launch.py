@@ -7,6 +7,30 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('simple_robot_description')
     params_file = os.path.join(pkg_share, 'config', 'ekf_params.yaml')
 
+    # LiDAR Odometry Node (ICP-based)
+    # Subscribes to: /lidar/points
+    # Publishes to: /lidar_odom
+    lidar_odom_node = Node(
+        package='simple_robot_control',
+        executable='lidar_odom',
+        name='lidar_odom_node',
+        output='screen',
+        parameters=[
+            {'min_points': 50},
+            {'max_correspondence_dist': 0.5},
+            {'lidar_noise_x': 0.05},
+            {'lidar_noise_y': 0.05},
+            {'lidar_noise_yaw': 0.02},
+            {'use_sim_time': True},
+        ],
+    )
+
+    # Extended Kalman Filter Node
+    # Fuses three sensors:
+    #   1. Wheel Odometry (/odom)
+    #   2. IMU (/imu)
+    #   3. LiDAR Odometry (/lidar_odom)
+    # Publishes fused odometry to: /odom_fused
     ekf_node = Node(
         package='simple_robot_control',
         executable='ekf_node',
@@ -22,4 +46,4 @@ def generate_launch_description():
         arguments=['--record', '--output', './runs'],
         output='screen',
     )
-    return LaunchDescription([ekf_node, vizualize])
+    return LaunchDescription([lidar_odom_node, ekf_node, vizualize])

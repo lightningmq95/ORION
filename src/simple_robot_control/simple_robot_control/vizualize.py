@@ -36,6 +36,7 @@ from rclpy.utilities import remove_ros_args
 # name → (color, linestyle)
 STYLES: Dict[str, tuple] = {
     'Wheel Odometry': ('green', '-'),
+    'LiDAR Odometry': ('red', '-'),
     'EKF Fused':      ('black', '-'),
     'Ground Truth':   ('purple', '-'),
 }
@@ -43,8 +44,9 @@ STYLES: Dict[str, tuple] = {
 # individual subplot grid positions — show raw native-frame data
 SUBPLOTS = [
     ('Wheel Odometry', 0, 0),
-    ('EKF Fused',      0, 1),
-    ('Ground Truth',   1, 0),
+    ('LiDAR Odometry', 0, 1),
+    ('EKF Fused',      1, 0),
+    ('Ground Truth',   1, 1),
 ]
 
 # ─────────────────────────── data model ──────────────────────────────────────
@@ -103,8 +105,9 @@ def _rmse(sx, sy, st, rx, ry, rt, max_dt=0.15):
 
 class Recorder(Node):
     """
-    Records odometry from three sources:
+    Records odometry from four sources:
       - /odom: Wheel odometry
+      - /lidar_odom: LiDAR ICP-based odometry
       - /odom_fused: EKF-fused pose
       - /ground_truth: Ground truth pose from Gazebo
     """
@@ -116,6 +119,7 @@ class Recorder(Node):
         # Dict for all odometry data
         self.data: Dict[str, SensorData] = {
             'Wheel Odometry': _mk('Wheel Odometry'),
+            'LiDAR Odometry': _mk('LiDAR Odometry'),
             'EKF Fused':      _mk('EKF Fused'),
             'Ground Truth':   _mk('Ground Truth'),
         }
@@ -128,6 +132,7 @@ class Recorder(Node):
 
         # Subscriptions
         self.create_subscription(Odometry,                  '/odom',                     self._cb_odom,      10)
+        self.create_subscription(Odometry,                  '/lidar_odom',               self._cb_lidar,     10)
         self.create_subscription(Odometry,                  '/odom_fused',               self._cb_ekf,       10)
         self.create_subscription(PoseStamped,               '/ground_truth',             pose_cb(self.data['Ground Truth']), 10)
 
@@ -140,6 +145,13 @@ class Recorder(Node):
             x  = msg.pose.pose.position.x
             y  = msg.pose.pose.position.y
             self.data['EKF Fused'].add(ts, x, y)
+
+    def _cb_lidar(self, msg: Odometry):
+        if self.recording:
+            ts = self._ts(msg.header.stamp)
+            x  = msg.pose.pose.position.x
+            y  = msg.pose.pose.position.y
+            self.data['LiDAR Odometry'].add(ts, x, y)
 
     def _cb_odom(self, msg: Odometry):
         if self.recording:
@@ -208,6 +220,7 @@ class Evaluator:
     def load_csv(self, in_dir: str):
         FILE_MAP = {
             'wheel_odometry': 'Wheel Odometry',
+            'lidar_odometry': 'LiDAR Odometry',
             'ekf_fused':      'EKF Fused',
             'ground_truth':   'Ground Truth',
         }
@@ -227,8 +240,8 @@ class Evaluator:
         x, y = sd.xy()
         if not len(x): return
         ax.plot(x, y, color=sd.color, ls=sd.linestyle, lw=lw, alpha=alpha, label=sd.name)
-        ax.scatter([x[0]], [y[0]], color=sd.color, marker='o', s=70, zorder=5, alpha=alpha)
-        ax.scatter([x[-1]], [y[-1]], color=sd.color, marker='s', s=70, zorder=5, alpha=alpha)
+        ax.scatter([x[0]], [y[0]], color=sd.color, marker='o', s=40, zorder=5, alpha=alpha)
+        ax.scatter([x[-1]], [y[-1]], color=sd.color, marker='s', s=40, zorder=5, alpha=alpha)
 
     def _subplot_raw(self, ax, name: str, gap_thr=1.0):
         """Individual subplot — sensor trajectory."""
@@ -236,42 +249,42 @@ class Evaluator:
         c  = STYLES.get(name, ('gray','-'))[0]
         if sd is None or not sd.count():
             ax.text(0.5, 0.5, 'No data', ha='center', va='center',
-                    transform=ax.transAxes, color='gray')
-            ax.set_title(f'{name}\n[no data]', fontsize=9, color='gray')
+                    transform=ax.transAxes, color='gray', fontsize=7)
+            ax.set_title(f'{name}\n[no data]', fontsize=7, color='gray')
             ax.grid(True, alpha=0.3); return
         x, y = sd.xy(); t = sd.ts()
         dur  = t[-1]-t[0] if len(t) > 1 else 0
         g    = sd.gaps(gap_thr); avail = 100*(1-sum(d for _,_,d in g)/dur) if g and dur else 100
-        ax.plot(x, y, color=c, lw=2, alpha=0.85)
-        ax.scatter([x[0]], [y[0]], color=c, marker='o', s=80, zorder=5)
-        ax.scatter([x[-1]], [y[-1]], color=c, marker='s', s=80, zorder=5)
+        ax.plot(x, y, color=c, lw=1.5, alpha=0.85)
+        ax.scatter([x[0]], [y[0]], color=c, marker='o', s=50, zorder=5)
+        ax.scatter([x[-1]], [y[-1]], color=c, marker='s', s=50, zorder=5)
         for gs, ge, _ in g:
             ib = np.argmin(np.abs(t-gs)); ia = np.argmin(np.abs(t-ge))
-            ax.plot([x[ib], x[ia]], [y[ib], y[ia]], 'r--', lw=1.5, alpha=0.7)
+            ax.plot([x[ib], x[ia]], [y[ib], y[ia]], 'r--', lw=1, alpha=0.7)
         info = (f'{sd.count()} pts | {sd.count()/max(dur,1e-9):.1f} Hz\n'
                 f'{_dist(x,y):.1f} m | {avail:.0f}% avail') if dur else f'{sd.count()} pts'
-        ax.text(0.03, 0.97, info, transform=ax.transAxes, fontsize=8, va='top',
+        ax.text(0.03, 0.97, info, transform=ax.transAxes, fontsize=6, va='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        ax.set_title(f'{name}', fontsize=9, color=c, fontweight='bold')
+        ax.set_title(f'{name}', fontsize=7, color=c, fontweight='bold')
         ax.grid(True, alpha=0.3); ax.axis('equal')
-        ax.set(xlabel='X (m)', ylabel='Y (m)'); ax.tick_params(labelsize=8)
+        ax.set(xlabel='X (m)', ylabel='Y (m)'); ax.tick_params(labelsize=6)
 
     def _subplot_enu(self, ax):
         """Combined plot — all sensors."""
-        priority = ['Ground Truth', 'Wheel Odometry', 'EKF Fused']
+        priority = ['Ground Truth', 'Wheel Odometry', 'LiDAR Odometry', 'EKF Fused']
         for name in priority:
             sd = self.data.get(name)
             if sd is None or not sd.count(): continue
-            lw = 2.5 if name == 'EKF Fused' else 1.5
+            lw = 2 if name == 'EKF Fused' else 1.2
             al = 0.9  if name == 'EKF Fused' else 0.7
             self._draw(ax, sd, lw=lw, alpha=al)
         ax.set(xlabel='X (m)', ylabel='Y (m)',
-               title='All sensors\n○ start  □ end')
-        ax.grid(True, alpha=0.3); ax.axis('equal'); ax.legend(loc='upper right', fontsize=9)
+               title='All sensors')
+        ax.grid(True, alpha=0.3); ax.axis('equal'); ax.legend(loc='upper right', fontsize=6)
         if self.rmse_vals:
-            txt = 'RMSE vs GT (origin-aligned)\n' + '\n'.join(
-                f'  {n}: {v:.4f} m' for n, v in sorted(self.rmse_vals.items(), key=lambda x: x[1]))
-            ax.text(0.02, 0.98, txt, transform=ax.transAxes, fontsize=8, va='top',
+            txt = 'RMSE vs GT\n' + '\n'.join(
+                f'{n}: {v:.4f}m' for n, v in sorted(self.rmse_vals.items(), key=lambda x: x[1]))
+            ax.text(0.02, 0.98, txt, transform=ax.transAxes, fontsize=6, va='top',
                     fontfamily='monospace',
                     bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
 
@@ -279,21 +292,22 @@ class Evaluator:
 
     def plot(self, gap_thr=1.0):
         """
-        2×2 grid of individual subplots plus combined plot.
+        2×2 grid of individual subplots plus 2×2 combined plot on the right.
         """
-        fig = plt.figure(figsize=(16, 12))
+        fig = plt.figure(figsize=(14, 7.2))
         fig.suptitle('Odometry Evaluation',
-                     fontsize=13, fontweight='bold')
-        gs = fig.add_gridspec(2, 2, hspace=0.35, wspace=0.35)
+                     fontsize=10, fontweight='bold')
+        gs = fig.add_gridspec(2, 4, hspace=0.25, wspace=0.25, width_ratios=[1, 1, 1, 1])
         for i, (name, row, col) in enumerate(SUBPLOTS):
             self._subplot_raw(fig.add_subplot(gs[row, col]), name, gap_thr)
-        self._subplot_enu(fig.add_subplot(gs[1, 1]))
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        # Combined plot on the right, spanning 2×2 area (square)
+        self._subplot_enu(fig.add_subplot(gs[:, 2:4]))
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
         return fig
 
     def plot_availability(self, gap_thr=1.0):
         """Horizontal bar chart of sensor availability over time."""
-        fig, ax = plt.subplots(figsize=(12, 4))
+        fig, ax = plt.subplots(figsize=(7, 4))
         names   = list(self.data.keys())
         ts_all  = [sd.ts() for sd in self.data.values() if sd.count()]
         t0 = min(t.min() for t in ts_all) if ts_all else 0
@@ -323,33 +337,33 @@ class LivePlot:
     def __init__(self, data: Dict[str, SensorData], interval_ms=600):
         self.data = data
         self._rec = True
-        self.fig = plt.figure(figsize=(16, 12))
-        gs = self.fig.add_gridspec(2, 2, hspace=0.35, wspace=0.35)
+        self.fig = plt.figure(figsize=(14, 7.2))
+        gs = self.fig.add_gridspec(2, 4, hspace=0.25, wspace=0.25, width_ratios=[1, 1, 1, 1])
 
         # individual subplots
         self.ax_ind = {}
         for name, row, col in SUBPLOTS:
             ax = self.fig.add_subplot(gs[row, col])
-            ax.set_title(f'{name}', fontsize=9, color=STYLES[name][0], fontweight='bold')
+            ax.set_title(f'{name}', fontsize=7, color=STYLES[name][0], fontweight='bold')
             ax.grid(True, alpha=0.3); ax.set_aspect('equal', 'datalim')
-            ax.set(xlabel='X (m)', ylabel='Y (m)'); ax.tick_params(labelsize=8)
+            ax.set(xlabel='X (m)', ylabel='Y (m)'); ax.tick_params(labelsize=6)
             self.ax_ind[name] = ax
 
-        # combined plot (bottom right)
-        self.ax_traj = self.fig.add_subplot(gs[1, 1])
-        self.ax_traj.set(title='Sensor Trajectories',
+        # combined plot (right side, 2×2 area - square)
+        self.ax_traj = self.fig.add_subplot(gs[:, 2:4])
+        self.ax_traj.set(title='All Sensors',
                          xlabel='X (m)', ylabel='Y (m)')
         self.ax_traj.grid(True, alpha=0.3)
         self._lines, self._ds, self._de = {}, {}, {}
         for name, (c, ls) in STYLES.items():
-            lw = 2.5 if name == 'EKF Fused' else 1.5
+            lw = 2 if name == 'EKF Fused' else 1.2
             al = 0.95 if name == 'EKF Fused' else 0.7
             self._lines[name], = self.ax_traj.plot([], [], color=c, ls=ls, lw=lw, alpha=al, label=name)
-            self._ds[name], = self.ax_traj.plot([], [], 'o', color=c, ms=7, zorder=5)
-            self._de[name], = self.ax_traj.plot([], [], 's', color=c, ms=7, zorder=5)
-        self.ax_traj.legend(loc='upper left', fontsize=8)
+            self._ds[name], = self.ax_traj.plot([], [], 'o', color=c, ms=5, zorder=5)
+            self._de[name], = self.ax_traj.plot([], [], 's', color=c, ms=5, zorder=5)
+        self.ax_traj.legend(loc='upper left', fontsize=6)
 
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
         self._anim = animation.FuncAnimation(self.fig, self._update,
                                              interval=interval_ms, blit=False,
                                              cache_frame_data=False)
@@ -375,19 +389,19 @@ class LivePlot:
             if sd is None or not sd.count(): continue
             x, y = sd.xy(); c, ls = STYLES[name]
             ax.clear()
-            ax.plot(x, y, color=c, ls=ls, lw=2, alpha=0.9)
-            ax.scatter([x[0]], [y[0]], color=c, marker='o', s=70, zorder=5)
-            ax.scatter([x[-1]], [y[-1]], color=c, marker='s', s=70, zorder=5)
-            ax.text(0.03, 0.97, f'pts:{len(x)}  dist:{_dist(x,y):.1f}m',
-                    transform=ax.transAxes, fontsize=8, va='top',
+            ax.plot(x, y, color=c, ls=ls, lw=1.5, alpha=0.9)
+            ax.scatter([x[0]], [y[0]], color=c, marker='o', s=40, zorder=5)
+            ax.scatter([x[-1]], [y[-1]], color=c, marker='s', s=40, zorder=5)
+            ax.text(0.03, 0.97, f'pts:{len(x)} d:{_dist(x,y):.1f}m',
+                    transform=ax.transAxes, fontsize=6, va='top',
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            ax.set_title(f'{name}', fontsize=9, color=c, fontweight='bold')
+            ax.set_title(f'{name}', fontsize=7, color=c, fontweight='bold')
             ax.grid(True, alpha=0.3); ax.set_aspect('equal', 'datalim')
-            ax.set(xlabel='X (m)', ylabel='Y (m)'); ax.tick_params(labelsize=8)
+            ax.set(xlabel='X (m)', ylabel='Y (m)'); ax.tick_params(labelsize=6)
 
         st  = '[● REC]' if self._rec else '[■ DONE]'
         self.fig.suptitle(f'Live Odometry  {st}',
-                          fontsize=12, fontweight='bold', color='red' if self._rec else 'black')
+                          fontsize=9, fontweight='bold', color='red' if self._rec else 'black')
 
     def stop(self): self._rec = False
     def show(self): plt.show()
@@ -501,13 +515,7 @@ def main():
     if args.visualize or args.record:
         fig = ev.plot(gap_thr=args.gap_threshold)
         if args.record:
-            print("\nDisplaying trajectories (close window to exit)...")
-        
-        def _sig(s, f): 
-            plt.close('all')
-            sys.exit(0)
-            
-        signal.signal(signal.SIGINT, _sig)
+            print("\nDisplaying trajectories (press Ctrl+C to exit)...")
         
         try: 
             plt.show(block=True)
@@ -515,7 +523,6 @@ def main():
             pass
         finally: 
             plt.close('all')
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
             if rclpy.ok():
                 rclpy.shutdown()
 

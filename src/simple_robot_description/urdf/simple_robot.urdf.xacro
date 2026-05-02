@@ -118,7 +118,7 @@
   <joint name="caster_joint" type="fixed">
     <parent link="base_link"/>
     <child link="caster_wheel"/>
-    <origin xyz="${-base_length/2 + caster_radius} 0 ${-base_height/2 - caster_radius/2}" rpy="0 0 0"/>
+    <origin xyz="${-base_length/2 + caster_radius} 0 ${-base_height/2 - wheel_radius - caster_radius + 0.04}" rpy="0 0 0"/>
   </joint>
 
   <gazebo reference="caster_wheel">
@@ -425,10 +425,10 @@
       <lidar>
         <scan>
           <horizontal>
-            <samples>640</samples>
+            <samples>1280</samples>
             <resolution>1</resolution>
-            <min_angle>-1.5708</min_angle>
-            <max_angle>1.5708</max_angle>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
           </horizontal>
           <vertical>
             <samples>16</samples>
