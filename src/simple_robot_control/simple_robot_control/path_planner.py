@@ -193,6 +193,10 @@ class PathPlanner:
                     pq.put(neighbor, priority)
                     came_from[neighbor] = current
 
+        # Guard: if goal was never reached / expanded, no valid path exists
+        if goal not in came_from:
+            return (None, None, start, goal)
+
         path = []
         cell = goal
         while cell:
@@ -209,8 +213,9 @@ class PathPlanner:
         chop_length = min(4, len(path) - 1)
         if chop_length > 0:
             path = path[:-chop_length]
-            
-        return (path, distance_cost_so_far[goal], start, goal)
+
+        final_cost = distance_cost_so_far.get(goal, float('inf'))
+        return (path, final_cost, start, goal)
 
     @staticmethod
     def path_to_message(mapdata: OccupancyGrid, path: "list[tuple[int, int]]", timestamp) -> Path:

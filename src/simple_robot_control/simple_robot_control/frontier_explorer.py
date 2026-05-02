@@ -205,13 +205,88 @@ class FrontierExplorer(Node):
                 return True
         return False
 
+    def _is_at_end_of_path(self) -> bool:
+        """Check if the robot has reached the end of the stored path.
+        Used to detect when a truncated path has been completed so we can
+        replan with updated map data instead of waiting for goal timeout."""
+        if not self.current_path or self.pose is None or self.mapdata is None:
+            return False
+        last_cell = self.current_path[-1]
+        last_world = PathPlanner.grid_to_world(self.mapdata, last_cell)
+        dist = math.hypot(
+            self.pose.position.x - last_world.x,
+            self.pose.position.y - last_world.y)
+        return dist < self.GOAL_REACHED_DIST
+
+    def _truncate_at_blind_turns(self, path):
+        """Cut the path at the first significant heading change that borders
+        unmapped (unknown) cells.  This forces the robot to approach unknown
+        regions head-on so the LiDAR can map obstacles on all sides before
+        the robot commits to a turn whose outcome is invisible.
+
+        Returns the (possibly shortened) path.
+        """
+        HEADING_WINDOW  = 3             # cells to average heading over
+        ANGLE_THRESHOLD = math.pi / 4   # 45° counts as a significant turn
+        UNKNOWN_RADIUS  = 5             # cell radius to scan for unknown space
+        MIN_KEEP        = 8             # always keep at least this many cells
+
+        if len(path) < max(HEADING_WINDOW * 2 + 1, MIN_KEEP) or self.mapdata is None:
+            return path
+
+        for i in range(HEADING_WINDOW, len(path) - HEADING_WINDOW):
+            # Smoothed heading before and after point i
+            dx_in  = path[i][0] - path[i - HEADING_WINDOW][0]
+            dy_in  = path[i][1] - path[i - HEADING_WINDOW][1]
+            dx_out = path[i + HEADING_WINDOW][0] - path[i][0]
+            dy_out = path[i + HEADING_WINDOW][1] - path[i][1]
+
+            if (dx_in == 0 and dy_in == 0) or (dx_out == 0 and dy_out == 0):
+                continue
+
+            angle_in  = math.atan2(dy_in, dx_in)
+            angle_out = math.atan2(dy_out, dx_out)
+            turn = abs(angle_out - angle_in)
+            if turn > math.pi:
+                turn = 2.0 * math.pi - turn
+
+            if turn < ANGLE_THRESHOLD:
+                continue
+
+            # Significant turn found — check for unknown cells nearby
+            cx, cy = path[i]
+            has_unknown = False
+            for dx in range(-UNKNOWN_RADIUS, UNKNOWN_RADIUS + 1):
+                for dy in range(-UNKNOWN_RADIUS, UNKNOWN_RADIUS + 1):
+                    cell = (cx + dx, cy + dy)
+                    if (PathPlanner.is_cell_in_bounds(self.mapdata, cell)
+                            and PathPlanner.get_cell_value(self.mapdata, cell) == -1):
+                        has_unknown = True
+                        break
+                if has_unknown:
+                    break
+
+            if has_unknown:
+                # Keep a few cells before the turn so the robot has a target
+                cut_idx = max(MIN_KEEP, i - 2)
+                if cut_idx >= len(path):
+                    return path  # nothing useful to truncate
+                self.get_logger().info(
+                    f"Blind turn detected at path[{i}] near unknown space — "
+                    f"truncating {len(path)} → {cut_idx} cells "
+                    f"(approaching straight to let LiDAR map first).")
+                return path[:cut_idx]
+
+        return path
+
     # ── main loop ───────────────────────────────────────────────────
 
     def explore_loop(self):
         if self.is_finished_exploring or self.pose is None or self.mapdata is None:
             return
 
-        start_cell = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
+        real_start = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
+        start_cell = real_start
 
         # --- Commit to current frontier goal ---
         # Check if we've reached/timed out the goal, or if path is blocked.
@@ -243,6 +318,16 @@ class FrontierExplorer(Node):
                 self.current_path = []
                 # Fall through to replan
             
+            # Check: have we completed a truncated path? (blind-turn safe approach)
+            # The robot reached the end of the path but is still far from the
+            # actual goal — replan now with the freshly-mapped surroundings.
+            elif self._is_at_end_of_path():
+                self.get_logger().info(
+                    "Reached end of truncated path — replanning with updated map.")
+                self.current_goal_centroid = None
+                self.current_path = []
+                # Fall through to replan
+            
             else:
                 # Goal is active, path is clear — keep going, skip replan
                 return
@@ -252,6 +337,7 @@ class FrontierExplorer(Node):
         cost_map = PathPlanner.calc_cost_map(self.mapdata)
 
         # --- Escape the A* Start Trap ---
+        # Nudge to a walkable cell for planning, but remember the real position
         if not PathPlanner.is_cell_walkable(cspace, start_cell):
             found_start = False
             for r in range(1, 15): 
@@ -349,6 +435,10 @@ class FrontierExplorer(Node):
             path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, goal_cell)
 
             if path:
+                # Stitch robot's real position to the front if start was nudged
+                if start_cell != real_start:
+                    path = [real_start] + path
+                path = self._truncate_at_blind_turns(path)
                 self.user_goal_fails = 0
                 self.current_path = path
                 path_msg = PathPlanner.path_to_message(self.mapdata, path, self.get_clock().now().to_msg())
@@ -401,6 +491,10 @@ class FrontierExplorer(Node):
             path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, home_cell)
 
             if path:
+                # Stitch robot's real position to the front if start was nudged
+                if start_cell != real_start:
+                    path = [real_start] + path
+                path = self._truncate_at_blind_turns(path)
                 self.return_home_fails = 0 # Reset fails, KEEP active_kernel
                 self.current_path = path
                 path_msg = PathPlanner.path_to_message(self.mapdata, path, self.get_clock().now().to_msg())
@@ -428,11 +522,17 @@ class FrontierExplorer(Node):
         frontiers  = self.search_frontiers(start_cell)
         self._publish_markers(frontiers)
 
-        # If we still have a goal but its frontier disappeared, clear it
-        if not self._goal_still_valid(frontiers):
-            if self.current_goal_centroid is not None:
-                self.get_logger().info("Current frontier gone — will replan.")
-            self.current_goal_centroid = None
+        # If we still have a goal but its frontier disappeared, check path
+        if not self._goal_still_valid(frontiers) and self.current_goal_centroid is not None:
+            if self._is_path_blocked():
+                self.get_logger().info("Current frontier gone AND path blocked — will replan.")
+                self.current_goal_centroid = None
+                self.current_path = []
+            else:
+                # Frontier centroid drifted but path is still clear — keep driving
+                self.get_logger().debug("Frontier centroid drifted but path is clear. Staying committed.")
+                return
+
 
         # We only reach here when current_goal_centroid is None (need a new goal)
 
@@ -457,6 +557,9 @@ class FrontierExplorer(Node):
                 continue
 
             path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, goal_cell)
+            # Stitch robot's real position to the front if start was nudged
+            if path and start_cell != real_start:
+                path = [real_start] + path
 
             if not path or not a_star_cost:
                 continue
@@ -481,6 +584,7 @@ class FrontierExplorer(Node):
             self.last_replan_time      = self.get_clock().now()
             self.goal_start_time       = self.get_clock().now() 
             
+            best_path = self._truncate_at_blind_turns(best_path)
             self.current_path = best_path
             path_msg = PathPlanner.path_to_message(
                 self.mapdata, best_path, self.get_clock().now().to_msg())

@@ -2,7 +2,6 @@ build/
 install/
 log/
 frames_*
-src/simple_robot_control/simple_robot_control/mapper_node_posegraph.py
 src/simple_robot_control/simple_robot_control/vizualize_matplotlib.py
 src/simple_robot_control/simple_robot_control/extended_kalman_filter_old.py
 runs/
