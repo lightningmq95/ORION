@@ -46,6 +46,12 @@ The params of the Extended Kalman Filter can be tweaked in the ekf_params.yaml f
 ros2 launch simple_robot_description mapper.launch.py
 ```
 
+### Start Lidar Odometry Node
+
+```sh
+ros2 launch rf2o_laser_odometry rf2o_laser_odometry.launch.py
+```
+
 ### RViz2
 
 ```sh

@@ -16,16 +16,26 @@ class ExtendedKalmanFilterNode(Node):
         # State covariance matrix (3x3) 
         self.P = np.eye(3) * 1.0
          
-        # ===== PROCESS NOISE (Body frame velocities) =====  
-        self.declare_parameter('process_noise_vx', 0.1)       
-        self.declare_parameter('process_noise_vy', 0.01) # Wheels don't slip much sideways     
-        self.declare_parameter('process_noise_yaw', 0.5)      
-        self.declare_parameter('imu_heading_noise', 0.05)     
+        # ===== PROCESS NOISE (Body frame velocities - from wheel encoders) =====  
+        # Higher values = lower trust in wheel odometry
+        self.declare_parameter('process_noise_vx', 0.25)       
+        self.declare_parameter('process_noise_vy', 0.1)  # Lowest trust (wheel encoders)
+        self.declare_parameter('process_noise_yaw', 0.4)      
+        
+        # ===== MEASUREMENT NOISE (Sensor measurements) =====
+        # Lower values = higher trust in measurements
+        self.declare_parameter('lidar_x_noise', 0.01)     # Highest trust (LiDAR x)
+        self.declare_parameter('lidar_y_noise', 0.01)     # Highest trust (LiDAR y)
+        self.declare_parameter('lidar_yaw_noise', 0.015)  # High trust (LiDAR yaw)
+        self.declare_parameter('imu_heading_noise', 0.05)  # Medium trust (IMU yaw only)
 
-        # higher = less trust
+        # higher = less trust in process model
         process_vx = self.get_parameter('process_noise_vx').value
         process_vy = self.get_parameter('process_noise_vy').value
         process_yaw = self.get_parameter('process_noise_yaw').value
+        self.R_lidar_x = self.get_parameter('lidar_x_noise').value
+        self.R_lidar_y = self.get_parameter('lidar_y_noise').value
+        self.R_lidar_yaw = self.get_parameter('lidar_yaw_noise').value
         self.R_imu = self.get_parameter('imu_heading_noise').value
          
         # Variance of the motion model (Control Space Covariance M)
@@ -40,12 +50,13 @@ class ExtendedKalmanFilterNode(Node):
          
         # Subscriptions 
         self.create_subscription(Odometry, '/odom', self.prediction_callback, 10) 
+        self.create_subscription(Odometry, '/odom_rf2o', self.lidar_callback, 10) 
         self.create_subscription(Imu, '/imu', self.imu_callback, 10) 
          
         # Publisher for fused odometry 
         self.fused_odom_pub = self.create_publisher(Odometry, '/odom_fused', 10) 
          
-        self.get_logger().info('EKF Node started (Wheel Odometry + IMU Yaw).') 
+        self.get_logger().info('EKF Node started (LiDAR + IMU Yaw + Wheel Odometry).') 
      
     def quaternion_to_yaw(self, qx, qy, qz, qw): 
         siny_cosp = 2 * (qw * qz + qx * qy) 
@@ -155,6 +166,57 @@ class ExtendedKalmanFilterNode(Node):
          
         # Update Covariance 
         self.P = (np.eye(3) - K @ H) @ self.P 
+     
+    def lidar_callback(self, msg):
+        """ UPDATE STEP: Driven by LiDAR odometry (rf2o) - HIGHEST TRUST """
+        lidar_x = msg.pose.pose.position.x
+        lidar_y = msg.pose.pose.position.y
+        lidar_yaw = self.quaternion_to_yaw(
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w
+        )
+        
+        # Measurement matrix (We measure x, y, and yaw from LiDAR)
+        H = np.eye(3)
+        
+        # Innovation (Difference between LiDAR measurement and predicted state)
+        innovations = np.array([
+            lidar_x - self.state[0],
+            lidar_y - self.state[1],
+            self.normalize_angle(lidar_yaw - self.state[2])
+        ])
+        
+        # Observation Covariance (R) - LiDAR has highest trust (lowest noise)
+        # Use values from message if available, otherwise use defaults
+        if msg.pose.covariance[0] > 0.0:
+            R_x = msg.pose.covariance[0]
+            R_y = msg.pose.covariance[7]
+            R_yaw = msg.pose.covariance[35]
+        else:
+            R_x = self.R_lidar_x
+            R_y = self.R_lidar_y
+            R_yaw = self.R_lidar_yaw
+        
+        R = np.array([
+            [R_x, 0.0, 0.0],
+            [0.0, R_y, 0.0],
+            [0.0, 0.0, R_yaw]
+        ])
+        
+        # Innovation Covariance
+        S = H @ self.P @ H.T + R
+        
+        # Kalman Gain
+        K = self.P @ H.T @ np.linalg.inv(S)
+        
+        # Correct the State
+        self.state = self.state + K @ innovations
+        self.state[2] = self.normalize_angle(self.state[2])
+        
+        # Update Covariance
+        self.P = (np.eye(3) - K @ H) @ self.P
      
     def publish_fused_odometry(self, timestamp): 
         odom = Odometry() 
