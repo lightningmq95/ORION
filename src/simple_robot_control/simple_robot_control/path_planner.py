@@ -158,17 +158,20 @@ class PathPlanner:
         # Binary mask: free cells = 255, obstacles/unknown = 0
         free_mask = np.where(map_arr == 0, 255, 0).astype(np.uint8)
 
-        # Single-pass distance transform (replaces 100-iteration dilation loop)
-        # DIST_L1 matches the original 4-connected dilation kernel behavior
-        dist = cv2.distanceTransform(free_mask, cv2.DIST_L1, 3)
+        # Euclidean distance from each free cell to the nearest obstacle
+        dist = cv2.distanceTransform(free_mask, cv2.DIST_L2, 5)
 
-        # Match original: cap at 100, subtract 1, floor at 0
-        cost_map = np.clip(dist - 1, 0, 99).astype(np.uint8)
+        # INVERTED cost: cells NEAR obstacles = high cost, FAR = zero cost.
+        # Penalty tapers quadratically to zero at PENALTY_RADIUS cells away.
+        # Beyond that radius, cost is 0 → pure shortest-path behavior.
+        PENALTY_RADIUS = 20.0  # cells (~1 m at 0.05 m resolution)
+        ratio = np.clip((PENALTY_RADIUS - dist) / PENALTY_RADIUS, 0.0, 1.0)
+        cost_map = (ratio * ratio * 100).astype(np.uint8)  # quadratic falloff
         return cost_map
 
     @staticmethod
     def a_star(mapdata, cost_map, start, goal):
-        COST_MAP_WEIGHT = 100 # additional penalty to stay away from walls
+        COST_MAP_WEIGHT = 0.5  # gentle wall-avoidance bias
         if not PathPlanner.is_cell_walkable(mapdata, start): return (None, None, start, goal)
         if not PathPlanner.is_cell_walkable(mapdata, goal): return (None, None, start, goal)
 
