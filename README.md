@@ -45,7 +45,7 @@ You can specify a world with:
 ros2 launch simple_robot_description gazebo.launch.py world_name:=empty/small_house/small_warehouse
 ```
 
-### Start Extended Kalman Filter and Vizualisation Node
+### Start Extended Kalman Filter
 
 ```sh
 ros2 launch simple_robot_description ekf.launch.py
@@ -53,16 +53,16 @@ ros2 launch simple_robot_description ekf.launch.py
 
 The params of the Extended Kalman Filter can be tweaked in the ekf_params.yaml file inside simple_robot_description/config/ekf_params.yaml
 
+### Start Vizualisation
+
+```sh
+python3 src/simple_robot_control/simple_robot_control/vizualize.py --record --output ./runs
+```
+
 ### Start Mapper Node
 
 ```sh
 ros2 launch simple_robot_description mapper.launch.py
-```
-
-### Start Lidar Odometry Node
-
-```sh
-ros2 launch rf2o_laser_odometry rf2o_laser_odometry.launch.py
 ```
 
 ### RViz2
