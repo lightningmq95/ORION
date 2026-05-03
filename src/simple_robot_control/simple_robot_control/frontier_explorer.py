@@ -21,7 +21,7 @@ class Frontier:
 class FrontierExplorer(Node):
 
     # ── tuning ──────────────────────────────────────────────────────
-    GOAL_REACHED_DIST   = 0.5    # metres; a margin given to a pose to mark it as reached
+    GOAL_REACHED_DIST   = 0.01    # metres; a margin given to a pose to mark it as reached
     REPLAN_COOLDOWN_S   = 2.0   # in seconds; Min cooldown time to look for new goals
     CURRENT_GOAL_BONUS  = 0.95  # A bonus given to the bot when it reaches a goal pose
     MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier

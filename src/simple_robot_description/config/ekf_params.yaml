@@ -1,21 +1,5 @@
 ekf_node:
   ros__parameters:
-    # ===== PROCESS NOISE (from wheel encoders - lowest trust) =====
-    process_noise_vx: 0.25 # Wheel encoder noise for forward/back motion
-    process_noise_vy: 0.15 # Wheel encoder noise for sideways motion (low wheel odometry trust)
-    process_noise_yaw: 0.3 # MUCH HIGHER: Wheel encoder turning is highly inaccurate (skidding)
-
-    # ===== MEASUREMENT NOISE (sensor measurements - TRUST HIERARCHY) =====
-    # Highest trust: LiDAR odometry (rf2o) - very low noise
-    lidar_x_noise: 0.01 # LiDAR x position measurement noise
-    lidar_y_noise: 0.01 # LiDAR y position measurement noise
-    lidar_yaw_noise: 0.3 # MUCH LOWER: Trust LiDAR almost perfectly for yaw
-
-    # Medium trust: IMU yaw only
-    imu_heading_noise: 0.001 # INCREASED: IMUs drift or are noisy during turns
-
-
-    # Trust hierarchy summary:
-    # 1. LiDAR (rf2o):        x_noise=0.01, y_noise=0.01, yaw_noise=0.015 (HIGHEST TRUST)
-    # 2. IMU:                 yaw_noise=0.05 (MEDIUM TRUST)
-    # 3. Wheel encoders:      process_noise_vx/vy/yaw = 0.35/0.15/0.5 (LOWEST TRUST)
+    process_noise_vx: 0.25 # Process noise for linear velocity (motion model)
+    process_noise_omega: 0.4 # Process noise for angular velocity (rotation model)
+    imu_heading_noise: 0.001 # Measurement noise for IMU heading (yaw)
