@@ -21,13 +21,14 @@ class Frontier:
 class FrontierExplorer(Node):
 
     # ── tuning ──────────────────────────────────────────────────────
-    GOAL_REACHED_DIST   = 0.01    # metres; a margin given to a pose to mark it as reached
+    GOAL_REACHED_DIST   = 0.35    # metres; margin to mark a goal as reached (must be > grid resolution)
     REPLAN_COOLDOWN_S   = 2.0   # in seconds; Min cooldown time to look for new goals
     CURRENT_GOAL_BONUS  = 0.95  # A bonus given to the bot when it reaches a goal pose
     MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier
     NUM_EXPLORE_FAILS   = 15    # After max explore failures it concludes that the map is fully explored and returns home
-    TOP_K_FRONTIERS     = 10     # detected 100 frontiers, it chooses top K to reduce CPU load
-    GOAL_TIMEOUT_S      = 15.0  # if robot is trying to reach the current goal and cant reach it, after GOAL_TIMEOUT_S time it will give up, blacklist that goal and forces a replan to somewhere else
+    TOP_K_FRONTIERS     = 5     # detected 100 frontiers, it chooses top K to reduce CPU load
+    GOAL_TIMEOUT_S      = 15.0  # seconds of NO PROGRESS before giving up (progress-aware, not wall-clock)
+    PROGRESS_THRESHOLD  = 0.2   # metres; minimum improvement to count as "making progress"
     DEFAULT_KERNEL_SIZE = 18    # Cspace thickness
     # ────────────────────────────────────────────────────────────────
 
@@ -49,8 +50,10 @@ class FrontierExplorer(Node):
         self.returning_home = False                      
         
         self.current_goal_centroid: Point | None = None  
-        self.last_replan_time = self.get_clock().now()
-        self.goal_start_time  = self.get_clock().now()
+        self.last_replan_time    = self.get_clock().now()
+        self.goal_start_time     = self.get_clock().now()
+        self.last_progress_time  = self.get_clock().now()   # reset when robot gets closer
+        self.best_goal_dist      = float('inf')             # closest distance achieved
         self.no_frontiers_found_counter = 0
         self.is_finished_exploring = False
         
@@ -301,36 +304,55 @@ class FrontierExplorer(Node):
                 self.blacklisted_centroids.append(self.current_goal_centroid)
                 self.current_goal_centroid = None
                 self.current_path = []
+                self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                 # Fall through to pick a new goal
             
-            # Check: has the goal timed out?
-            elif (self.get_clock().now() - self.goal_start_time).nanoseconds * 1e-9 > self.GOAL_TIMEOUT_S:
-                self.get_logger().warn("Goal timeout (stuck). Blacklisting and replanning.")
-                self.blacklisted_centroids.append(self.current_goal_centroid)
-                self.current_goal_centroid = None
-                self.current_path = []
-                # Fall through to pick a new goal
-            
-            # Check: is the path blocked by a new obstacle?
-            elif self._is_path_blocked():
-                self.get_logger().warn("Obstacle detected on path! Forcing immediate replan.")
-                self.current_goal_centroid = None
-                self.current_path = []
-                # Fall through to replan
-            
-            # Check: have we completed a truncated path? (blind-turn safe approach)
-            # The robot reached the end of the path but is still far from the
-            # actual goal — replan now with the freshly-mapped surroundings.
-            elif self._is_at_end_of_path():
-                self.get_logger().info(
-                    "Reached end of truncated path — replanning with updated map.")
-                self.current_goal_centroid = None
-                self.current_path = []
-                # Fall through to replan
-            
+            # Check: is the robot making progress toward the goal?
+            # Update best distance and reset the stall timer on improvement.
             else:
-                # Goal is active, path is clear — keep going, skip replan
-                return
+                current_dist = self._dist_to_point(self.current_goal_centroid)
+                if current_dist < self.best_goal_dist - self.PROGRESS_THRESHOLD:
+                    self.best_goal_dist = current_dist
+                    self.last_progress_time = self.get_clock().now()
+
+                stall_seconds = (self.get_clock().now() - self.last_progress_time).nanoseconds * 1e-9
+
+                if stall_seconds > self.GOAL_TIMEOUT_S:
+                    self.get_logger().warn(
+                        f"No progress for {stall_seconds:.1f}s "
+                        f"(best dist {self.best_goal_dist:.2f}m). "
+                        f"Blacklisting and replanning.")
+                    self.blacklisted_centroids.append(self.current_goal_centroid)
+                    self.current_goal_centroid = None
+                    self.current_path = []
+                    self.best_goal_dist = float('inf')
+                    self.path_pub.publish(Path())  # stop Pure Pursuit immediately
+                    # Fall through to pick a new goal
+            
+                # Check: is the path blocked by a new obstacle?
+                elif self._is_path_blocked():
+                    self.get_logger().warn("Obstacle detected on path! Forcing immediate replan.")
+                    self.current_goal_centroid = None
+                    self.current_path = []
+                    self.best_goal_dist = float('inf')
+                    self.path_pub.publish(Path())  # stop Pure Pursuit immediately
+                    # Fall through to replan
+                
+                # Check: have we completed a truncated path? (blind-turn safe approach)
+                # The robot reached the end of the path but is still far from the
+                # actual goal — replan now with the freshly-mapped surroundings.
+                elif self._is_at_end_of_path():
+                    self.get_logger().info(
+                        "Reached end of truncated path — replanning with updated map.")
+                    self.current_goal_centroid = None
+                    self.current_path = []
+                    self.best_goal_dist = float('inf')
+                    self.path_pub.publish(Path())  # stop Pure Pursuit immediately
+                    # Fall through to replan
+                
+                else:
+                    # Goal is active, path is clear, making progress — keep going
+                    return
         
         # Calculate C-Space using the locked active_kernel
         cspace   = PathPlanner.calc_cspace(self.mapdata, kernel_size=self.active_kernel)
@@ -582,7 +604,9 @@ class FrontierExplorer(Node):
                 self.get_logger().info(f"New frontier goal: ({best_centroid.x:.2f}, {best_centroid.y:.2f})")
             self.current_goal_centroid = best_centroid
             self.last_replan_time      = self.get_clock().now()
-            self.goal_start_time       = self.get_clock().now() 
+            self.goal_start_time       = self.get_clock().now()
+            self.last_progress_time    = self.get_clock().now()
+            self.best_goal_dist        = self._dist_to_point(best_centroid)
             
             best_path = self._truncate_at_blind_turns(best_path)
             self.current_path = best_path
@@ -591,6 +615,8 @@ class FrontierExplorer(Node):
             self.path_pub.publish(path_msg)
         else:
             self.no_frontiers_found_counter += 1
+            self.current_path = []
+            self.path_pub.publish(Path())  # no valid path — stop Pure Pursuit
             if self.no_frontiers_found_counter >= self.NUM_EXPLORE_FAILS:
                 self.get_logger().info("All reachable frontiers discovered! Returning to original position...")
                 self.returning_home = True
