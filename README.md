@@ -1,8 +1,8 @@
-## Pose Estimation and Mapping of unknown environment using multi-sensor fusion with Extended Kalman Filter
+## Pose Estimation and Autonomous Mapping of unknown environment using multi-sensor fusion with Extended Kalman Filter
 
 This project uses:
 
-- Ubuntu 22.04 with ROS Humble.
+- Ubuntu 22.04 with ROS2 Humble.
 - Gazebo for simulation.
 - rviz2 for visualization.
 
