@@ -1,5 +1,18 @@
 ## Pose Estimation and Mapping of unknown environment using multi-sensor fusion with Extended Kalman Filter
 
+This project uses:
+
+- Ubuntu 22.04 with ROS Humble.
+- Gazebo for simulation.
+- rviz2 for visualization.
+
+### Install dependencies for point cloud to laserscan conversion
+
+```sh
+sudo apt update
+sudo apt install ros-humble-pointcloud-to-laserscan
+```
+
 ### Build the env
 
 ```sh
@@ -29,7 +42,7 @@ ros2 launch simple_robot_description gazebo.launch.py
 You can specify a world with:
 
 ```sh
-ros2 launch simple_robot_description gazebo.launch.py world_name:=simple_world/small_house/small_warehouse
+ros2 launch simple_robot_description gazebo.launch.py world_name:=empty/small_house/small_warehouse
 ```
 
 ### Start Extended Kalman Filter and Vizualisation Node
@@ -73,3 +86,10 @@ ros2 run simple_robot_control robot_subscriber
 ```
 
 Run ros2 topic list to see the available topics from the simulation which you can use to access camera, odometry, lidar data, etc.
+
+### If Gazebo shows errors and crashes, install it using
+
+```sh
+sudo pkill -f gazebo
+sudo pkill -f ign
+```
