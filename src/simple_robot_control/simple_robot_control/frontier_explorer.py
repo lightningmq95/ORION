@@ -27,8 +27,7 @@ class FrontierExplorer(Node):
     MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier
     NUM_EXPLORE_FAILS   = 15    # After max explore failures it concludes that the map is fully explored and returns home
     TOP_K_FRONTIERS     = 5     # detected 100 frontiers, it chooses top K to reduce CPU load
-    GOAL_TIMEOUT_S      = 15.0  # seconds of NO PROGRESS before giving up (progress-aware, not wall-clock)
-    PROGRESS_THRESHOLD  = 0.2   # metres; minimum improvement to count as "making progress"
+    GOAL_TIMEOUT_S      = 15.0  # seconds of NO PROGRESS before giving up (path-index based)
     DEFAULT_KERNEL_SIZE = 18    # Cspace thickness
     # ────────────────────────────────────────────────────────────────
 
@@ -52,8 +51,8 @@ class FrontierExplorer(Node):
         self.current_goal_centroid: Point | None = None  
         self.last_replan_time    = self.get_clock().now()
         self.goal_start_time     = self.get_clock().now()
-        self.last_progress_time  = self.get_clock().now()   # reset when robot gets closer
-        self.best_goal_dist      = float('inf')             # closest distance achieved
+        self.last_progress_time  = self.get_clock().now()   # reset when robot advances along path
+        self.best_path_idx       = 0                         # furthest path cell index reached
         self.no_frontiers_found_counter = 0
         self.is_finished_exploring = False
         
@@ -221,6 +220,20 @@ class FrontierExplorer(Node):
             self.pose.position.y - last_world.y)
         return dist < self.GOAL_REACHED_DIST
 
+    def _get_nearest_path_idx(self) -> int:
+        """Return the index of the path cell closest to the robot."""
+        if not self.current_path or self.pose is None or self.mapdata is None:
+            return 0
+        robot_cell = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
+        min_dist_sq = float('inf')
+        nearest_idx = 0
+        for i, cell in enumerate(self.current_path):
+            d_sq = (cell[0] - robot_cell[0]) ** 2 + (cell[1] - robot_cell[1]) ** 2
+            if d_sq < min_dist_sq:
+                min_dist_sq = d_sq
+                nearest_idx = i
+        return nearest_idx
+
     def _truncate_at_blind_turns(self, path):
         """Cut the path at the first significant heading change that borders
         unmapped (unknown) cells.  This forces the robot to approach unknown
@@ -307,25 +320,27 @@ class FrontierExplorer(Node):
                 self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                 # Fall through to pick a new goal
             
-            # Check: is the robot making progress toward the goal?
-            # Update best distance and reset the stall timer on improvement.
+            # Check: is the robot making progress along the path?
+            # Track which path cell the robot is nearest to; if the index
+            # advances, the robot is following the path (even during U-turns
+            # where Euclidean distance to the goal temporarily increases).
             else:
-                current_dist = self._dist_to_point(self.current_goal_centroid)
-                if current_dist < self.best_goal_dist - self.PROGRESS_THRESHOLD:
-                    self.best_goal_dist = current_dist
+                current_idx = self._get_nearest_path_idx()
+                if current_idx > self.best_path_idx + 2:  # advanced by >2 cells
+                    self.best_path_idx = current_idx
                     self.last_progress_time = self.get_clock().now()
 
                 stall_seconds = (self.get_clock().now() - self.last_progress_time).nanoseconds * 1e-9
 
                 if stall_seconds > self.GOAL_TIMEOUT_S:
                     self.get_logger().warn(
-                        f"No progress for {stall_seconds:.1f}s "
-                        f"(best dist {self.best_goal_dist:.2f}m). "
+                        f"No path progress for {stall_seconds:.1f}s "
+                        f"(stuck at path cell {self.best_path_idx}/{len(self.current_path)}). "
                         f"Blacklisting and replanning.")
                     self.blacklisted_centroids.append(self.current_goal_centroid)
                     self.current_goal_centroid = None
                     self.current_path = []
-                    self.best_goal_dist = float('inf')
+                    self.best_path_idx = 0
                     self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                     # Fall through to pick a new goal
             
@@ -334,7 +349,7 @@ class FrontierExplorer(Node):
                     self.get_logger().warn("Obstacle detected on path! Forcing immediate replan.")
                     self.current_goal_centroid = None
                     self.current_path = []
-                    self.best_goal_dist = float('inf')
+                    self.best_path_idx = 0
                     self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                     # Fall through to replan
                 
@@ -346,7 +361,7 @@ class FrontierExplorer(Node):
                         "Reached end of truncated path — replanning with updated map.")
                     self.current_goal_centroid = None
                     self.current_path = []
-                    self.best_goal_dist = float('inf')
+                    self.best_path_idx = 0
                     self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                     # Fall through to replan
                 
@@ -606,7 +621,7 @@ class FrontierExplorer(Node):
             self.last_replan_time      = self.get_clock().now()
             self.goal_start_time       = self.get_clock().now()
             self.last_progress_time    = self.get_clock().now()
-            self.best_goal_dist        = self._dist_to_point(best_centroid)
+            self.best_path_idx         = 0
             
             best_path = self._truncate_at_blind_turns(best_path)
             self.current_path = best_path
