@@ -39,7 +39,7 @@ class FrontierExplorer(Node):
         self.marker_pub = self.create_publisher(MarkerArray, '/frontiers_vis',     10)
 
         self.create_subscription(Odometry,      '/odom_fused', self.odom_callback, 10)
-        self.create_subscription(OccupancyGrid, '/map_inflated',        self.map_callback,  10)
+        self.create_subscription(OccupancyGrid, '/map',        self.map_callback,  10)
         self.create_subscription(PoseStamped,   '/goal_pose',  self.goal_pose_callback, 10)
 
         self.pose       = None

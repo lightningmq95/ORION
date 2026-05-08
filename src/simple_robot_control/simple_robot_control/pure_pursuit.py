@@ -26,7 +26,7 @@ class PurePursuit(Node):
         self.cmd_vel = self.create_publisher(Twist, "/cmd_vel", 10)
 
         self.create_subscription(Odometry, "/odom_fused", self.update_odometry, 10)
-        self.create_subscription(OccupancyGrid, "/map_inflated", self.update_map, 10)
+        self.create_subscription(OccupancyGrid, "/map", self.update_map, 10)
         self.create_subscription(Path, "/pure_pursuit/path", self.update_path, 10)
 
         self.LOOKAHEAD_DISTANCE = 0.75  
