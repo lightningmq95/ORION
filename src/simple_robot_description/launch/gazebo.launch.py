@@ -160,7 +160,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/joint_states@sensor_msgs/msg/JointState@ignition.msgs.Model',
+            '/joint_states@sensor_msgs/msg/JointState@gz.msgs.Model',
         ],
         output='screen'
     )
@@ -180,7 +180,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/cmd_vel@geometry_msgs/msg/Twist]ignition.msgs.Twist',
+            '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
         ],
         output='screen'
     )
@@ -190,7 +190,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock',
+            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
         ],
         output='screen'
     )
@@ -209,7 +209,7 @@ def generate_launch_description():
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/world/default/dynamic_pose/info@tf2_msgs/msg/TFMessage[ignition.msgs.Pose_V',
+            '/world/default/dynamic_pose/info@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
         ],
         output='screen'
     )

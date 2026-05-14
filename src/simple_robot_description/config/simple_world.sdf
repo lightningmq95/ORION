@@ -8,30 +8,30 @@
     </physics>
     
     <plugin
-      filename="libignition-gazebo-physics-system.so"
-      name="ignition::gazebo::systems::Physics">
+      filename="libgz-sim-physics-system.so"
+      name="gz::sim::systems::Physics">
     </plugin>
     
     <plugin
-      filename="libignition-gazebo-user-commands-system.so"
-      name="ignition::gazebo::systems::UserCommands">
+      filename="libgz-sim-user-commands-system.so"
+      name="gz::sim::systems::UserCommands">
     </plugin>
     
     <plugin
-      filename="libignition-gazebo-scene-broadcaster-system.so"
-      name="ignition::gazebo::systems::SceneBroadcaster">
+      filename="libgz-sim-scene-broadcaster-system.so"
+      name="gz::sim::systems::SceneBroadcaster">
     </plugin>
     
     <plugin
-      filename="libignition-gazebo-sensors-system.so"
-      name="ignition::gazebo::systems::Sensors">
+      filename="libgz-sim-sensors-system.so"
+      name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
 
     <!-- IMU System Plugin - REQUIRED for IMU sensors to work -->
     <plugin
-      filename="libignition-gazebo-imu-system.so"
-      name="ignition::gazebo::systems::Imu">
+      filename="libgz-sim-imu-system.so"
+      name="gz::sim::systems::Imu">
     </plugin>
 
     <light type="directional" name="sun">
