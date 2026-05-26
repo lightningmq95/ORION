@@ -10,7 +10,7 @@ This project uses:
 
 ```sh
 sudo apt update
-sudo apt install ros-humble-pointcloud-to-laserscan
+sudo apt install ros-$ROS_DISTRO-pointcloud-to-laserscan
 ```
 
 ### Build the env
