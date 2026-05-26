@@ -2,7 +2,7 @@
 
 This project uses:
 
-- Ubuntu 22.04 with ROS2 Humble.
+- Ubuntu 24.04 with ROS2 Jazzy.
 - Gazebo for simulation.
 - rviz2 for visualization.
 
