@@ -1,3 +1,5 @@
+# Authors: Akash Mohapatra, Manas Chintawar
+
 import math
 import cv2
 import numpy as np

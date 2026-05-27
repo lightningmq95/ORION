@@ -1,3 +1,5 @@
+# Authors: Akash Mohapatra, Manas Chintawar
+
 #!/usr/bin/env python3
 """
 eval.py — Odometry recording, evaluation, and visualization.

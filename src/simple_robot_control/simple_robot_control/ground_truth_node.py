@@ -1,3 +1,5 @@
+# Authors: Akash Mohapatra, Manas Chintawar
+
 #!/usr/bin/env python3
 """
 Ground truth pose publisher that extracts robot pose from Gazebo's dynamic_pose/info

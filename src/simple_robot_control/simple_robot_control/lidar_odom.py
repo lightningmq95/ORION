@@ -1,3 +1,5 @@
+# Authors: Akash Mohapatra, Manas Chintawar
+
 #!/usr/bin/env python3
 """
 2D LiDAR Odometry - Scan-to-Local-Map ICP

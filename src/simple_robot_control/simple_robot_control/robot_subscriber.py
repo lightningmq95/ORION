@@ -1,3 +1,5 @@
+# Authors: Akash Mohapatra, Manas Chintawar
+
 #!/usr/bin/env python3
 """
 Simple keyboard control for the robot using WASD and arrow keys with IMU monitoring.

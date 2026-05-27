@@ -6,7 +6,7 @@ package_name = 'simple_robot_control'
 
 setup(
     name=package_name,
-    version='0.0.1',
+    version='1.0',
     packages=[package_name],
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -15,8 +15,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Your Name',
-    maintainer_email='you@example.com',
+    maintainer='Akash Mohapatra, Manas Chintawar',
+    maintainer_email='akashmahapatra762@gmail.com, manaschintawar123@gmail.com',
     description='Control nodes for simple robot',
     license='Apache-2.0',
     tests_require=['pytest'],
