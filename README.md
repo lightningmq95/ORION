@@ -1,8 +1,11 @@
 ## Pose Estimation and Autonomous Mapping of unknown environment using multi-sensor fusion with Extended Kalman Filter
 
-This project uses:
+Tested on:
 
-- Ubuntu 24.04 with ROS2 Jazzy.
+- Ubuntu 24.04 (ROS2 Jazzy) and Ubuntu 26.04 (ROS2 Lyrical).
+
+Project uses:
+
 - Gazebo for simulation.
 - rviz2 for visualization.
 
