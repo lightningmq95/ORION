@@ -19,7 +19,6 @@ setup(
     maintainer_email='akashmahapatra762@gmail.com, manaschintawar123@gmail.com',
     description='Control nodes for simple robot',
     license='Apache-2.0',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'robot_subscriber = simple_robot_control.robot_subscriber:main',
