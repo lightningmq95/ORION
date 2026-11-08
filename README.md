@@ -95,6 +95,18 @@ The preset uses the `odom` fixed frame and enables the map (`/map`) and planned
 path (`/pure_pursuit/path`) displays. Start the mapper and autonomous navigation
 nodes to populate them. The display topics are already configured.
 
+The **Frontiers** display subscribes to `/frontiers_vis` and shows all currently
+detected frontiers, including candidates the robot cannot presently reach:
+
+- **Green:** reachable approach goals.
+- **Yellow:** the active goal.
+- **Orange:** temporarily deferred frontiers.
+- **Gray:** blocked frontiers.
+- **Cyan:** frontier boundary cells.
+
+Frontiers refresh while navigation runs. The retained marker snapshot also
+appears when RViz opens after exploration has already started.
+
 ### Start Autonomous traversal Node with Frontier Exploration
 
 ```sh
