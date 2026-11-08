@@ -195,15 +195,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    bridge_tf = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=[
-           '/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
-        ],
-        output='screen'
-    )
-
      # Bridge for ground truth poses
     bridge_ground_truth = Node(
         package='ros_gz_bridge',
@@ -238,7 +229,6 @@ def generate_launch_description():
         bridge_odom,
         bridge_cmd_vel,
         bridge_clock,
-        bridge_tf,
         bridge_ground_truth,
         ground_truth_node,
     ])

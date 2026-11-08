@@ -14,10 +14,12 @@ def generate_launch_description():
         output='screen',
         parameters=[
             {'min_points': 50},
-            {'max_correspondence_dist': 0.5},
-            {'lidar_noise_x': 0.01},
-            {'lidar_noise_y': 0.01},
-            {'lidar_noise_yaw': 0.03},
+            {'icp_max_dist': 0.5},
+            {'cov_x': 0.01},
+            {'cov_y': 0.01},
+            {'cov_yaw': 0.03},
+            # Gazebo already publishes odom -> base_footprint on /tf.
+            {'publish_tf': False},
             {'use_sim_time': True},
         ],
     )
@@ -27,7 +29,7 @@ def generate_launch_description():
         executable='ekf_node',
         name='ekf_node',
         output='screen',
-        parameters=[params_file, {'use_sim_time': True}],
+        parameters=[params_file, {'use_sim_time': True, 'publish_tf': True}],
     )
 
     # vizualize = Node(

@@ -1,5 +1,7 @@
 from launch import LaunchDescription
+
 from launch_ros.actions import Node
+
 
 def generate_launch_description():
     pointcloud_to_laserscan = Node(
@@ -8,14 +10,17 @@ def generate_launch_description():
         name='pointcloud_to_laserscan',
         parameters=[{
             'use_sim_time': True,
-            'min_height': 0.1,
-            'max_height': 0.5,
-            'angle_min': -1.5708,
-            'angle_max': 1.5708,
+            'target_frame': 'lidar_link',
+            # Collision-height returns, including a full view for safe turns.
+            'min_height': 0.0,
+            'max_height': 0.2,
+            'angle_min': -3.141592653589793,
+            'angle_max': 3.141592653589793,
             'range_min': 0.08,
             'range_max': 10.0,
             'angle_increment': 0.005,
             'scan_time': 0.1,
+            'use_inf': True,
         }],
         remappings=[
             ('cloud_in', '/lidar/points'),
@@ -28,7 +33,7 @@ def generate_launch_description():
         package='simple_robot_control',
         executable='mapper_node',
         name='simple_mapper',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': True, 'pose_topic': '/lidar_odom'}],
         output='screen',
     )
 
