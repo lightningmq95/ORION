@@ -130,6 +130,11 @@ class PurePursuit(Node):
         self._stall_latched = False
         self._control_period = 0.05
         self._rollout_dt = 0.1
+        self.min_x = -self.robot_length / 2
+        self.max_x = self.robot_length / 2
+        self.min_y = -self.robot_width / 2
+        self.max_y = self.robot_width / 2
+        self._tf_geometry_initialized = False
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -288,6 +293,52 @@ class PurePursuit(Node):
         if not msg.poses and not self._reversing:
             self.stop()
             self._clear_blocked(self._now())
+
+    def _update_body_geometry_from_tf(self):
+        """Update robot body bounds and drive axle dynamically from the TF2 tree."""
+        if self._tf_geometry_initialized:
+            return
+        links = [
+            'base_link', 'left_wheel', 'right_wheel', 'caster_wheel',
+            'camera_left_link', 'camera_right_link', 'lidar_link'
+        ]
+        extents = {
+            'base_link': (0.20, 0.15),
+            'left_wheel': (0.05, 0.02),
+            'right_wheel': (0.05, 0.02),
+            'caster_wheel': (0.025, 0.025),
+            'camera_left_link': (0.015, 0.04),
+            'camera_right_link': (0.015, 0.04),
+            'lidar_link': (0.05, 0.05),
+        }
+        xs, ys = [], []
+        axle_x = None
+        for link in links:
+            try:
+                trans = self.tf_buffer.lookup_transform(
+                    self.base_frame, link, Time()).transform
+                tx, ty = trans.translation.x, trans.translation.y
+                hx, hy = extents.get(link, (0.02, 0.02))
+                xs.extend([tx - hx, tx + hx])
+                ys.extend([ty - hy, ty + hy])
+                if 'wheel' in link and axle_x is None:
+                    axle_x = tx
+            except Exception:
+                continue
+        if xs and ys:
+            self.min_x = min(xs)
+            self.max_x = max(xs)
+            self.min_y = min(ys)
+            self.max_y = max(ys)
+            self.robot_length = self.max_x - self.min_x
+            self.robot_width = self.max_y - self.min_y
+            if axle_x is not None:
+                self.drive_axle_offset = axle_x
+            self._tf_geometry_initialized = True
+            self.get_logger().info(
+                f'PurePursuit TF2 body model: length={self.robot_length:.2f}m, '
+                f'width={self.robot_width:.2f}m, axle_offset={self.drive_axle_offset:.2f}m, '
+                f'bounds=({self.min_x:.2f}, {self.max_x:.2f}, {self.min_y:.2f}, {self.max_y:.2f})')
 
     def _sensor_mount(self, frame):
         if frame == self.base_frame:
@@ -505,10 +556,10 @@ class PurePursuit(Node):
             dy = obstacles[None, None, :, 1] - wy[start:end, :, None]
             ch = np.cos(heading[start:end, :, None])
             sh = np.sin(heading[start:end, :, None])
-            longitudinal = np.maximum(
-                np.abs(ch * dx + sh * dy) - self.robot_length / 2, 0)
-            lateral = np.maximum(
-                np.abs(-sh * dx + ch * dy) - self.robot_width / 2, 0)
+            bx = ch * dx + sh * dy
+            by = -sh * dx + ch * dy
+            longitudinal = np.maximum(np.maximum(self.min_x - bx, bx - self.max_x), 0)
+            lateral = np.maximum(np.maximum(self.min_y - by, by - self.max_y), 0)
             squared_clearance = longitudinal * longitudinal + lateral * lateral
             minimum_squared = np.min(squared_clearance, axis=(1, 2))
             safe[start:end] &= minimum_squared > reserves[start:end] ** 2
@@ -557,6 +608,12 @@ class PurePursuit(Node):
             speeds, turns, initial_speed, initial_turn)
         safe, clearance = self._collision_scores(trajectories, world_pose, obstacles, margin)
 
+        # Follow the requested route whenever its nominal arc clears the body.
+        # Extra clearance must not reward an unnecessary turn in open space.
+        nominal_index = int(np.argmin(np.abs(turns - nominal_turn)))
+        if safe[nominal_index]:
+            return float(speeds[nominal_index]), nominal_turn, True
+
         if not np.any(safe):
             # No safe forward arc at normal speed: path is blocked ahead
             return 0.0, 0.0, False
@@ -583,6 +640,7 @@ class PurePursuit(Node):
 
     def run_step(self):
         now = self._now()
+        self._update_body_geometry_from_tf()
         healthy = (self.pose is not None
                    and self.mapdata is not None and self._scan_valid
                    and self._localization_valid and not self._wheel_slip

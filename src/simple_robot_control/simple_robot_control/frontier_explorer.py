@@ -17,6 +17,8 @@ import rclpy
 from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from simple_robot_control.path_planner import PathPlanner
 
@@ -122,7 +124,11 @@ class FrontierExplorer(Node):
         self._free_mask = None
         self._free_labels = None
         self._frontier_cache = {}
-        self._path_array = np.empty((0, 2), dtype=np.int32)
+        self._path_array = np.empty((0, 2), dtype=np.float64)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.body_bounds = (-0.20, 0.22, -0.17, 0.17)
+        self._tf_geometry_initialized = False
 
         # ── state management ────────────────────────────────────────
         self.initial_pose: Point | None = None
@@ -168,6 +174,43 @@ class FrontierExplorer(Node):
 
     def _publish_heartbeat(self):
         self.heartbeat_pub.publish(Empty())
+
+    def _update_body_geometry_from_tf(self):
+        """Extract physical robot body dimensions and bounds from the TF2 tree."""
+        if self._tf_geometry_initialized:
+            return
+        links = [
+            'base_link', 'left_wheel', 'right_wheel', 'caster_wheel',
+            'camera_left_link', 'camera_right_link', 'lidar_link'
+        ]
+        extents = {
+            'base_link': (0.20, 0.15),
+            'left_wheel': (0.05, 0.02),
+            'right_wheel': (0.05, 0.02),
+            'caster_wheel': (0.025, 0.025),
+            'camera_left_link': (0.015, 0.04),
+            'camera_right_link': (0.015, 0.04),
+            'lidar_link': (0.05, 0.05),
+        }
+        xs, ys = [], []
+        for link in links:
+            try:
+                trans = self.tf_buffer.lookup_transform(
+                    'base_footprint', link, Time()).transform
+                tx, ty = trans.translation.x, trans.translation.y
+                hx, hy = extents.get(link, (0.02, 0.02))
+                xs.extend([tx - hx, tx + hx])
+                ys.extend([ty - hy, ty + hy])
+            except Exception:
+                continue
+        if xs and ys:
+            self.body_bounds = (min(xs), max(xs), min(ys), max(ys))
+            self.robot_length = max(xs) - min(xs)
+            self.robot_width = max(ys) - min(ys)
+            self._tf_geometry_initialized = True
+            self.get_logger().info(
+                f'Robot body dynamics from TF2: length={self.robot_length:.2f}m, '
+                f'width={self.robot_width:.2f}m, bounds={self.body_bounds}')
 
     def _request_start_recovery(self, active):
         # True is a short lease renewed by explore_loop, not a motion command.
@@ -364,7 +407,8 @@ class FrontierExplorer(Node):
             f.approach.x - saved_goal.x, f.approach.y - saved_goal.y))
         goal_cell = PathPlanner.world_to_grid(self.mapdata, frontier.approach)
         path, _, _, _ = planner.a_star(start_cell, goal_cell)
-        if not path:
+        if not path or not PathPlanner.check_body_traversability(
+                self.mapdata, path, self.body_bounds):
             return None, None
         return path, frontier.approach
 
@@ -558,7 +602,10 @@ class FrontierExplorer(Node):
         return int(xs[best]), int(ys[best])
 
     def _get_cspace_walkable(self):
-        self._minimum_kernel = 5
+        # Half-width inflation allows A* to explore all physically traversable openings;
+        # full body dynamics then verifies orientation and clearance along paths.
+        half_width_cells = math.ceil((self.robot_width / 2) / self.mapdata.info.resolution)
+        self._minimum_kernel = max(3, 2 * half_width_cells + 1)
         self.active_kernel = max(self.active_kernel, self._minimum_kernel)
         if (self._cspace_array is None
                 or self._cspace_kernel != self.active_kernel):
@@ -593,7 +640,7 @@ class FrontierExplorer(Node):
     def current_path(self, path):
         """Replace the route and refresh its cached cell coordinates."""
         self._current_path = path
-        self._path_array = np.asarray(path, dtype=np.int32).reshape(-1, 2)
+        self._path_array = np.asarray(path, dtype=np.float64).reshape(-1, 2)
 
     def _publish_path(self, path, real_start, start_cell):
         if not path:
@@ -616,7 +663,7 @@ class FrontierExplorer(Node):
         return math.hypot(dx, dy)
 
     def _is_path_blocked(self, nearest_idx=None, use_cspace=False) -> bool:
-        """Check whether actual obstacles block the stored path ahead."""
+        """Check whether actual obstacles block the stored path ahead using body dynamics."""
         if not self.current_path or self.mapdata is None or self.pose is None:
             return False
 
@@ -625,11 +672,12 @@ class FrontierExplorer(Node):
         ahead = self._path_array[nearest_idx:]
         if not len(ahead):
             return False
-        xs, ys = ahead[:, 0], ahead[:, 1]
+        xs, ys = ahead[:, 0] + 0.5, ahead[:, 1] + 0.5
         height, width = self._map_array.shape
         if np.any((xs < 0) | (xs >= width) | (ys < 0) | (ys >= height)):
             return True
-        return bool(np.any(self._map_array[ys, xs] >= 50))
+        return not PathPlanner.check_body_traversability(
+            self.mapdata, ahead, self.body_bounds, margin=0.01)
 
     def _is_at_end_of_path(self, tolerance=None) -> bool:
         """Check if the robot has reached the end of the stored path.
@@ -660,6 +708,7 @@ class FrontierExplorer(Node):
                 or self.pose is None or self.mapdata is None):
             self._request_start_recovery(False)
             return
+        self._update_body_geometry_from_tf()
         if not self._tracking_ready():
             self._request_start_recovery(False)
             if self.current_path:
@@ -859,7 +908,15 @@ class FrontierExplorer(Node):
                 self._finish_manual_goal()
                 return
 
-            path, _, _, _ = planner.a_star(start_cell, goal_cell)
+            path = PathPlanner.shortest_path(
+                self.mapdata, planner, start_cell, goal_cell,
+                self.body_bounds, margin=self.safety_margin)
+            if path and start_cell != real_start:
+                path = PathPlanner.resample_path([real_start] + path)
+                if not PathPlanner.check_body_traversability(
+                        self.mapdata, path, self.body_bounds,
+                        margin=self.safety_margin):
+                    path = None
 
             if path:
                 self.user_goal_fails = 0
@@ -958,6 +1015,9 @@ class FrontierExplorer(Node):
             for frontier, (path, distance, _, _) in zip(batch, results):
                 if not path or distance is None:
                     continue
+                if not PathPlanner.check_body_traversability(
+                        self.mapdata, path, self.body_bounds):
+                    continue
                 cost = 10.0 * distance + 1.0 / frontier.size
                 if cost < lowest_cost:
                     lowest_cost = cost
@@ -1034,6 +1094,7 @@ class FrontierExplorer(Node):
         clear = marker('frontiers', 0, Marker.SPHERE)
         clear.action = Marker.DELETEALL
         boundary = marker('frontier_boundaries', 0, Marker.POINTS)
+        boundary.pose.position.z = 0.04
         boundary.scale.x = boundary.scale.y = self.mapdata.info.resolution
         boundary.color.g = boundary.color.b = 1.0
         boundary.color.a = 0.85

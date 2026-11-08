@@ -122,9 +122,9 @@ class PlanningGrid:
     def _index(self, cell):
         return (cell[1] + 1) * self.stride + cell[0] + 1
 
-    def a_star(self, start, goal):
-        """Find a minimum weighted-cost route to one goal."""
-        return self._search(start, [goal])[0]
+    def a_star(self, start, goal, *, use_cost_map=True):
+        """Find a route, optionally minimizing distance without soft costs."""
+        return self._search(start, [goal], use_cost_map=use_cost_map)[0]
 
     def a_star_many(self, start, goals):
         """
@@ -142,7 +142,7 @@ class PlanningGrid:
             return [self.a_star(start, goal) for goal in goals]
         return self._search(start, goals)
 
-    def _search(self, start, goals):
+    def _search(self, start, goals, *, use_cost_map=True):
         """
         Find minimum weighted-cost paths to all goals in one search.
 
@@ -161,7 +161,8 @@ class PlanningGrid:
             if (self.is_walkable(goal)
                     and self._components[goal[1], goal[0]] == component):
                 targets.setdefault(self._index(goal), []).append(i)
-        if not self._has_penalties:
+        has_penalties = use_cost_map and self._has_penalties
+        if not has_penalties:
             for target, indices in list(targets.items()):
                 direct = self._direct_path(start, goals[indices[0]])
                 if direct is not None:
@@ -214,7 +215,9 @@ class PlanningGrid:
                 if side1 and not (walkable[current + side1]
                                   and walkable[current + side2]):
                     continue  # a robot cannot squeeze diagonally through walls
-                new_cost = current_cost + distance + penalties[neighbor]
+                new_cost = current_cost + distance
+                if has_penalties:
+                    new_cost += penalties[neighbor]
                 if (generations[neighbor] == generation
                         and new_cost >= costs[neighbor]):
                     continue
@@ -339,6 +342,196 @@ class PathPlanner:
             return False
         val = PathPlanner.get_cell_value(mapdata, p)
         return 0 <= val < 50
+
+    @staticmethod
+    def check_body_traversability(mapdata, path, body_bounds, margin=0.01):
+        """Check continuous forward segments and turns of a rectangular body.
+
+        Paths contain grid cells; bounds are (xmin, xmax, ymin, ymax) in
+        metres relative to the robot's reference frame. Occupied cell squares
+        must clear the whole body, including its asymmetric front/rear offsets.
+        The centreline must remain known free; the body may overhang unknown
+        cells at a frontier, consistent with C-space's unknown-space policy.
+        A singleton is checked conservatively for every possible heading.
+        """
+        points = np.asarray(path, dtype=np.float64)
+        bounds = np.asarray(body_bounds, dtype=np.float64)
+        resolution = float(mapdata.info.resolution)
+        if (points.ndim != 2 or points.shape[1] != 2 or not len(points)
+                or bounds.shape != (4,) or not np.isfinite(points).all()
+                or not np.isfinite(bounds).all()
+                or not math.isfinite(resolution) or resolution <= 0
+                or not math.isfinite(margin) or margin < 0):
+            return False
+        xmin, xmax, ymin, ymax = bounds
+        if xmin >= xmax or ymin >= ymax:
+            return False
+        grid = _map_array(mapdata)
+        height, width = grid.shape
+        centres = points + 0.5
+        if np.any((centres < 0) | (centres >= (width, height))):
+            return False
+        cells = np.floor(centres).astype(np.intp)
+        if np.any((grid[cells[:, 1], cells[:, 0]] < 0)
+                  | (grid[cells[:, 1], cells[:, 0]] >= 50)):
+            return False
+        occupied = grid >= 50
+        unknown = grid < 0
+
+        def rectangle_clear(cx, cy, yaw, hx, hy, blocked):
+            # Separating-axis intersection of an oriented rectangle with cell
+            # squares. Checking just cell centres can miss a wall at an edge.
+            c, s = math.cos(yaw), math.sin(yaw)
+            abs_c, abs_s = abs(c), abs(s)
+            ex, ey = abs_c * hx + abs_s * hy, abs_s * hx + abs_c * hy
+            if (cx - ex < 0 or cy - ey < 0
+                    or cx + ex > width * resolution
+                    or cy + ey > height * resolution):
+                return False
+            x0 = max(0, math.floor((cx - ex) / resolution - 1e-9))
+            y0 = max(0, math.floor((cy - ey) / resolution - 1e-9))
+            x1 = min(width, math.floor((cx + ex) / resolution) + 1)
+            y1 = min(height, math.floor((cy + ey) / resolution) + 1)
+            ys, xs = np.nonzero(blocked[y0:y1, x0:x1])
+            if not len(xs):
+                return True
+            dx = (xs + x0 + 0.5) * resolution - cx
+            dy = (ys + y0 + 0.5) * resolution - cy
+            half_cell = resolution * 0.5
+            projection = half_cell * (abs_c + abs_s)
+            overlap = ((np.abs(dx) <= ex + half_cell + 1e-9)
+                       & (np.abs(dy) <= ey + half_cell + 1e-9)
+                       & (np.abs(c * dx + s * dy) <= hx + projection + 1e-9)
+                       & (np.abs(-s * dx + c * dy) <= hy + projection + 1e-9))
+            return not np.any(overlap)
+
+        ox, oy = (xmin + xmax) * 0.5, (ymin + ymax) * 0.5
+        hx, hy = (xmax - xmin) * 0.5 + margin, (ymax - ymin) * 0.5 + margin
+        radius = math.hypot(abs(ox) + hx, abs(oy) + hy)
+
+        def body_clear(point, yaw, extension=0.0, padding=0.0):
+            c, s = math.cos(yaw), math.sin(yaw)
+            return rectangle_clear(
+                point[0] + c * ox - s * oy,
+                point[1] + s * ox + c * oy, yaw,
+                hx + extension + padding, hy + padding, occupied)
+
+        # Drop duplicates and merge straight runs so checks scale with bends,
+        # rather than with map resolution on long, open corridors.
+        points = points[np.r_[True, np.any(np.diff(points, axis=0), axis=1)]]
+        if len(points) > 2:
+            steps = np.diff(points, axis=0)
+            turns = (~np.isclose(
+                steps[:-1, 0] * steps[1:, 1],
+                steps[:-1, 1] * steps[1:, 0], rtol=1e-10, atol=1e-10)
+                     | (np.sum(steps[:-1] * steps[1:], axis=1) <= 0))
+            points = points[np.r_[True, turns, True]]
+        points = (points + 0.5) * resolution
+        if len(points) == 1:
+            return rectangle_clear(*points[0], 0.0, radius, radius, occupied)
+        steps = np.diff(points, axis=0)
+        headings = np.arctan2(steps[:, 1], steps[:, 0])
+        for index, (step, yaw) in enumerate(zip(steps, headings)):
+            half_length = math.hypot(*step) * 0.5
+            midpoint = (points[index] + points[index + 1]) * 0.5
+            # Translation along a heading sweeps one elongated rectangle:
+            # no gaps between samples, even for sparse input waypoints.
+            if (not rectangle_clear(*midpoint, yaw, half_length, 0.0, unknown)
+                    or not body_clear(midpoint, yaw, extension=half_length)):
+                return False
+            if index == 0:
+                continue
+            turn = math.remainder(yaw - headings[index - 1], 2 * math.pi)
+            count = max(1, math.ceil(abs(turn) * radius / (0.5 * resolution)))
+            increment = turn / count
+            # Each midpoint rectangle is enlarged by the maximum displacement
+            # of any body corner during its angular interval, covering the
+            # continuous rotation rather than just discrete headings.
+            padding = radius * abs(increment) * 0.5
+            for sample in range(count):
+                angle = headings[index - 1] + (sample + 0.5) * increment
+                if not body_clear(points[index], angle, padding=padding):
+                    return False
+        return True
+
+    @staticmethod
+    def resample_path(path):
+        """Space continuous grid coordinates at most one cell apart."""
+        if not path:
+            return []
+        result = [tuple(map(float, path[0]))]
+        for start, end in zip(path, path[1:]):
+            count = max(1, math.ceil(
+                PathPlanner.euclidean_distance(start, end)))
+            result.extend(map(tuple, np.linspace(start, end, count + 1)[1:]))
+        return result
+
+    @staticmethod
+    def shortest_path(mapdata, planner, start, goal, body_bounds,
+                      margin=0.06):
+        """Prefer a straight route, then shorten a distance-based A* route.
+
+        Hard footprint clearance still applies. Soft proximity penalties do
+        not make a manual waypoint detour across an otherwise clear room.
+        Fractional grid coordinates preserve arbitrary straight-line angles;
+        dense output supports pursuit lookahead and remaining-route checks.
+        """
+        def clear(route):
+            return PathPlanner.check_body_traversability(
+                mapdata, route, body_bounds, margin=margin)
+
+        direct = [start] if start == goal else [start, goal]
+        if clear(direct):
+            return PathPlanner.resample_path(direct)
+
+        def shorten(path):
+            shortened = [path[0]]
+            anchor = 0
+            while anchor < len(path) - 1:
+                for candidate in range(len(path) - 1, anchor, -1):
+                    # Include the previous segment so a shortcut cannot
+                    # introduce a turn whose swept body hits an obstacle.
+                    if clear(shortened[-2:] + [path[candidate]]):
+                        shortened.append(path[candidate])
+                        anchor = candidate
+                        break
+                else:
+                    # A greedy shortcut may leave too little turning room.
+                    return path if clear(path) else None
+            return shortened
+
+        # Distance-only grid routes can hug corners too tightly for the body.
+        # If necessary, obtain a route with more clearance, then remove its
+        # unnecessary bends using the same full-footprint checks.
+        for use_cost_map in (False, True):
+            path, _, _, _ = planner.a_star(
+                start, goal, use_cost_map=use_cost_map)
+            if path:
+                result = shorten(path)
+                if result:
+                    return PathPlanner.resample_path(result)
+
+        # A point-grid route may fit at the robot's sides while its corners
+        # cannot turn. Try a graph with clearance for every body heading,
+        # including map edges, before declaring a physical route unavailable.
+        grid = _map_array(mapdata)
+        xmin, xmax, ymin, ymax = body_bounds
+        radius = math.hypot(max(abs(xmin), abs(xmax)) + margin,
+                            max(abs(ymin), abs(ymax)) + margin)
+        resolution = mapdata.info.resolution
+        free = np.pad((grid < 50).astype(np.uint8), 1)
+        clearance = cv2.distanceTransform(
+            free, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)[1:-1, 1:-1] * resolution
+        reserve = radius + (math.sqrt(0.5) + 0.5) * resolution
+        safe = (grid >= 0) & (grid < 50) & (clearance > reserve)
+        body_planner = PathPlanner.prepare(
+            mapdata, np.zeros_like(grid), np.where(safe, 0, 100))
+        path, _, _, _ = body_planner.a_star(start, goal)
+        if path:
+            result = shorten(path)
+            if result:
+                return PathPlanner.resample_path(result)
+        return None
 
     @staticmethod
     def neighbors(mapdata, p, directions, must_be_walkable=True):
