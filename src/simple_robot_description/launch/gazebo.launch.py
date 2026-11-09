@@ -33,6 +33,7 @@ def generate_launch_description():
     robot_description = {'robot_description': robot_description_config.toxml()}
 
     world_name_arg = DeclareLaunchArgument(name="world_name", default_value="empty")
+    headless_arg = DeclareLaunchArgument(name='headless', default_value='false')
 
     world_path = PathJoinSubstitution([
         pkg_simple_robot,
@@ -45,7 +46,14 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')
         ),
-        launch_arguments={'gz_args': ['-r ', world_path]}.items(),
+        launch_arguments={'gz_args': [
+            '-r ',
+            PythonExpression([
+                "'-s --headless-rendering ' if '",
+                LaunchConfiguration('headless'), "'.lower() == 'true' else ''",
+            ]),
+            world_path,
+        ]}.items(),
     )
 
     # # Gazebo launch headless
@@ -215,6 +223,7 @@ def generate_launch_description():
     return LaunchDescription([
         gazebo_resource_path,
         world_name_arg,
+        headless_arg,
         robot_state_publisher,
         gazebo,
         spawn_robot,

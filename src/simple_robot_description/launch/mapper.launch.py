@@ -33,7 +33,10 @@ def generate_launch_description():
         package='simple_robot_control',
         executable='mapper_node',
         name='simple_mapper',
-        parameters=[{'use_sim_time': True, 'pose_topic': '/lidar_odom'}],
+        parameters=[{
+            'use_sim_time': True,
+            'pose_topic': '/lidar_odom',
+        }],
         output='screen',
     )
 

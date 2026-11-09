@@ -1,232 +1,329 @@
-# Authors: Akash Mohapatra, Manas Chintawar
+"""Drive the robot to reachable frontiers while checking live LiDAR returns."""
 
 import math
-import cv2
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Point
+
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
+
 import numpy as np
-import heapq
-from std_msgs.msg import Header
-from nav_msgs.msg import GridCells, OccupancyGrid, Path
-from geometry_msgs.msg import Point, Quaternion, Pose, PoseStamped
 
-DIRECTIONS_OF_4 = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-DIRECTIONS_OF_8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+import rclpy
+from rclpy.clock import Clock, ClockType
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
+from rclpy.time import Time
 
-# Pre-computed distances for 8-connected neighbors (avoids sqrt on every call)
-_SQRT2 = math.sqrt(2)
-DIRECTIONS_AND_DISTANCES_OF_8 = [
-    ((-1, -1), _SQRT2), ((-1, 0), 1.0), ((-1, 1), _SQRT2),
-    ((0, -1), 1.0),                      ((0, 1), 1.0),
-    ((1, -1), _SQRT2),  ((1, 0), 1.0),  ((1, 1), _SQRT2),
-]
+from sensor_msgs.msg import LaserScan
 
-class PriorityQueue:
+from std_msgs.msg import Bool
+from visualization_msgs.msg import Marker
+
+from tf2_ros import Buffer, TransformException, TransformListener
+
+from .frontier_explorer import (Grid, frontier_is_productive, frontier_points,
+                                motion_is_clear, plan_frontier)
+from .lidar_odom import apply_T, make_T, scan_to_points
+from .pure_pursuit import command_for_path
+
+
+def _yaw(q):
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+class AutonomousExplorer(Node):
+    """Combine the occupancy map, EKF pose and timestamped obstacle returns."""
+
     def __init__(self):
-        self.elements = []
-    def empty(self) -> bool:
-        return not self.elements
-    def put(self, item, priority):
-        heapq.heappush(self.elements, (priority, item))
-    def get(self):
-        return heapq.heappop(self.elements)[1]
+        super().__init__('path_planner')
+        self.max_speed = self.declare_parameter('max_speed',2.0).value
+        self.max_turn = self.declare_parameter('max_turn', 1.4).value
+        if not all(math.isfinite(value) and value > 0.0 for value in (
+                self.max_speed, self.max_turn)):
+            raise ValueError('Speed limits must be finite and positive')
 
-def quaternion_from_euler(ai, aj, ak):
-    q = [0.0] * 4
-    cy = math.cos(ak * 0.5)
-    sy = math.sin(ak * 0.5)
-    cp = math.cos(aj * 0.5)
-    sp = math.sin(aj * 0.5)
-    cr = math.cos(ai * 0.5)
-    sr = math.sin(ai * 0.5)
-    q[0] = sr * cp * cy - cr * sp * sy
-    q[1] = cr * sp * cy + sr * cp * sy
-    q[2] = cr * cp * sy - sr * sp * cy
-    q[3] = cr * cp * cy + sr * sp * sy
-    return q
+        self.grid = self.pose = self.hits = self.pending_scan = None
+        self.grid_time = self.pose_time = self.scan_time = None
+        self.tracking_time = None
+        self.path = None
+        self.plan = None
+        self.start_pose = None
+        self.returning_home = False
+        self.home_reached = False
+        self.replan_goal = None
+        self.discard_plan = False
+        self.next_plan = 0.0
+        self.status = None
+        self.planner = ThreadPoolExecutor(max_workers=1)
+        self.tf_buffer = Buffer(node=self)
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self._no_path_count = 0
+        self._blocked_count = 0
+        self._spin_start_time = None
+        self._spin_duration = 14.0
+        map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.VOLATILE)
+        visualization_qos = QoSProfile(
+            depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(OccupancyGrid, '/map', self._on_map, map_qos)
+        self.create_subscription(Odometry, '/odom_fused', self._on_pose, 1)
+        self.create_subscription(LaserScan, '/lidar_2d_scan', self._on_scan,
+                                 qos_profile_sensor_data)
+        self.create_subscription(Bool, '/localization/tracking_valid', self._on_tracking, 1)
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 1)
+        self.path_pub = self.create_publisher(
+            Path, '/exploration/path', visualization_qos)
+        self.frontier_pub = self.create_publisher(
+            Marker, '/exploration/frontiers', visualization_qos)
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+        self.create_timer(0.05, self._tick, clock=self.steady_clock)
 
-class PathPlanner:
-    @staticmethod
-    def grid_to_index(mapdata: OccupancyGrid, p: "tuple[int, int]") -> int:
-        return p[1] * mapdata.info.width + p[0]
+    def _on_map(self, msg):
+        info = msg.info
+        origin = (info.origin.position.x, info.origin.position.y)
+        q = info.origin.orientation
+        if (msg.header.frame_id != 'odom' or not math.isfinite(info.resolution)
+                or info.resolution <= 0.0 or not all(map(math.isfinite, origin))
+                or (q.x, q.y, q.z) != (0.0, 0.0, 0.0)
+                or not info.height or not info.width
+                or len(msg.data) != info.height * info.width):
+            self.grid = None
+            return
+        values = np.asarray(msg.data, dtype=np.int8).reshape(info.height, info.width)
+        self.grid = Grid(values, origin, info.resolution)
+        self.grid_time = self._received(msg.header.stamp)
 
-    @staticmethod
-    def get_cell_value(mapdata: OccupancyGrid, p: "tuple[int, int]") -> int:
-        return mapdata.data[PathPlanner.grid_to_index(mapdata, p)]
+    def _on_pose(self, msg):
+        pose = msg.pose.pose
+        self.pose = (pose.position.x, pose.position.y, _yaw(pose.orientation))
+        if (msg.header.frame_id != 'odom' or msg.child_frame_id != 'base_footprint'
+                or not all(map(math.isfinite, self.pose))):
+            self.pose = None
+            return
+        received = self._received(msg.header.stamp)
+        if self.pose_time is not None and received[0] < self.pose_time[0]:
+            # A simulation clock reset invalidates the previous map and path.
+            self.grid = self.hits = self.pending_scan = None
+            self._clear_path()
+        self.pose_time = received
 
-    @staticmethod
-    def euclidean_distance(p1: "tuple[float, float]", p2: "tuple[float, float]") -> float:
-        return math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+    def _on_scan(self, msg):
+        self.pending_scan = msg, self._received(msg.header.stamp)
 
-    @staticmethod
-    def grid_to_world(mapdata: OccupancyGrid, p: "tuple[int, int]") -> Point:
-        x = (p[0] + 0.5) * mapdata.info.resolution + mapdata.info.origin.position.x
-        y = (p[1] + 0.5) * mapdata.info.resolution + mapdata.info.origin.position.y
-        return Point(x=float(x), y=float(y), z=0.0)
-
-    @staticmethod
-    def world_to_grid(mapdata: OccupancyGrid, wp: Point) -> "tuple[int, int]":
-        x = int((wp.x - mapdata.info.origin.position.x) / mapdata.info.resolution)
-        y = int((wp.y - mapdata.info.origin.position.y) / mapdata.info.resolution)
-        return (x, y)
-
-    @staticmethod
-    def path_to_poses(mapdata: OccupancyGrid, path: "list[tuple[int, int]]") -> "list[PoseStamped]":
-        poses = []
-        for i in range(len(path) - 1):
-            cell = path[i]
-            next_cell = path[i + 1]
-            angle_to_next = 0.0
-            if i != len(path) - 1:
-                angle_to_next = math.atan2(next_cell[1] - cell[1], next_cell[0] - cell[0])
-            q = quaternion_from_euler(0, 0, angle_to_next)
-            
-            pose_stamped = PoseStamped()
-            pose_stamped.header.frame_id = "odom"
-            pose_stamped.pose.position = PathPlanner.grid_to_world(mapdata, cell)
-            pose_stamped.pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
-            poses.append(pose_stamped)
-        return poses
-
-    @staticmethod
-    def is_cell_in_bounds(mapdata: OccupancyGrid, p: "tuple[int, int]") -> bool:
-        return 0 <= p[0] < mapdata.info.width and 0 <= p[1] < mapdata.info.height
-
-    @staticmethod
-    def is_cell_walkable(mapdata: OccupancyGrid, p: "tuple[int, int]") -> bool:
-        if not PathPlanner.is_cell_in_bounds(mapdata, p): return False
-        val = PathPlanner.get_cell_value(mapdata, p)
-        return 0 <= val < 50
-
-    @staticmethod
-    def neighbors(mapdata, p, directions, must_be_walkable=True):
-        neighbors = []
-        for direction in directions:
-            candidate = (p[0] + direction[0], p[1] + direction[1])
-            if (must_be_walkable and PathPlanner.is_cell_walkable(mapdata, candidate)) or \
-               (not must_be_walkable and PathPlanner.is_cell_in_bounds(mapdata, candidate)):
-                neighbors.append(candidate)
-        return neighbors
+    def _on_tracking(self, msg):
+        self.tracking_time = time.monotonic() if msg.data else None
+        if not msg.data:
+            self._clear_path()
 
     @staticmethod
-    def neighbors_of_4(mapdata, p, must_be_walkable=True):
-        return PathPlanner.neighbors(mapdata, p, DIRECTIONS_OF_4, must_be_walkable)
+    def _received(stamp):
+        return Time.from_msg(stamp).nanoseconds, time.monotonic()
 
     @staticmethod
-    def neighbors_of_8(mapdata, p, must_be_walkable=True):
-        return PathPlanner.neighbors(mapdata, p, DIRECTIONS_OF_8, must_be_walkable)
+    def _fresh(received, now, wall_now, timeout):
+        return (received is not None and wall_now - received[1] <= timeout
+                and -0.10 <= (now - received[0]) * 1e-9 <= timeout)
 
-    @staticmethod
-    def neighbors_and_distances_of_8(mapdata, p, must_be_walkable=True):
-        neighbors = []
-        for direction, distance in DIRECTIONS_AND_DISTANCES_OF_8:
-            candidate = (p[0] + direction[0], p[1] + direction[1])
-            if not must_be_walkable or PathPlanner.is_cell_walkable(mapdata, candidate):
-                neighbors.append((candidate, distance))
-        return neighbors
+    def _update_obstacles(self, now, wall_now):
+        if self.pending_scan is None:
+            return
+        msg, received = self.pending_scan
+        if not self._fresh(received, now, wall_now, 0.5):
+            self.pending_scan = None
+            return
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                'odom', msg.header.frame_id, Time.from_msg(msg.header.stamp)).transform
+        except TransformException:
+            # Wait for the EKF transform to reach the scan's acquisition time.
+            return
+        self.pending_scan = None
+        self.scan_time = received
+        if not all(map(math.isfinite, (msg.range_min, msg.range_max,
+                                       msg.angle_min, msg.angle_increment))):
+            self.hits = None
+            return
+        points = scan_to_points(msg, np.nextafter(msg.range_max, -np.inf))
+        self.hits = None
+        if len(points):
+            mount = transform.translation
+            self.hits = apply_T(make_T(mount.x, mount.y, _yaw(transform.rotation)), points)
 
-    # --- UPDATED: Dynamic Kernel Size ---
-    @staticmethod
-    def calc_cspace(mapdata: OccupancyGrid, kernel_size: int = 21):
-        
-        width = mapdata.info.width
-        height = mapdata.info.height
-        
-        map_arr = np.array(mapdata.data).reshape(height, width).astype(np.uint8)
-        
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        
-        unknown_area_mask = cv2.inRange(map_arr, 255, 255)
-        unknown_area_mask = cv2.erode(unknown_area_mask, kernel, iterations=1)
-        
-        map_arr[map_arr == 255] = 0
-        obstacle_mask = cv2.dilate(map_arr, kernel, iterations=1)
-        
-        cspace_data = cv2.bitwise_or(obstacle_mask, unknown_area_mask)
-        
-        final_cspace_array = np.where(cspace_data > 0, 100, 0).astype(np.int8)
-        
-        cspace = OccupancyGrid()
-        cspace.header = mapdata.header
-        cspace.info = mapdata.info
-        cspace.data = final_cspace_array.flatten().tolist()
-        return cspace
+    def _publish_path(self):
+        msg = Path()
+        msg.header.frame_id = 'odom'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        if self.path is not None:
+            for x, y in self.path:
+                point = PoseStamped()
+                point.header = msg.header
+                point.pose.position.x = float(x)
+                point.pose.position.y = float(y)
+                point.pose.orientation.w = 1.0
+                msg.poses.append(point)
+        self.path_pub.publish(msg)
 
-    @staticmethod
-    def calc_cost_map(mapdata: OccupancyGrid) -> np.ndarray:
-        width = mapdata.info.width
-        height = mapdata.info.height
-        map_arr = np.array(mapdata.data).reshape(height, width).astype(np.uint8)
-        map_arr[map_arr == 255] = 100  # treat unknown as obstacle
+    def _publish_frontiers(self):
+        marker = Marker()
+        marker.header.frame_id = 'odom'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'exploration'
+        marker.id = 0
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = 0.08
+        marker.scale.y = 0.08
+        marker.color.r = 1.0
+        marker.color.g = 0.2
+        marker.color.b = 0.1
+        marker.color.a = 1.0
+        if self.grid is not None and self.pose is not None and self.hits is not None:
+            marker.points = [
+                Point(x=float(x), y=float(y), z=0.08)
+                for x, y in frontier_points(self.grid, self.pose, self.hits)
+            ]
+        self.frontier_pub.publish(marker)
 
-        # Binary mask: free cells = 255, obstacles/unknown = 0
-        free_mask = np.where(map_arr == 0, 255, 0).astype(np.uint8)
+    def _clear_path(self):
+        if self.path is not None:
+            self.path = None
+            self._publish_path()
+        self.discard_plan = True
+        self._no_path_count = 0
+        self._blocked_count = 0
+        self._spin_start_time = None
 
-        # Euclidean distance from each free cell to the nearest obstacle
-        dist = cv2.distanceTransform(free_mask, cv2.DIST_L2, 5)
+    def _update_path(self, wall_now):
+        if self.plan is not None and self.plan.done():
+            if not self.discard_plan:
+                new_path = self.plan.result()
+                if self.returning_home and new_path is None:
+                    self.home_reached = True
+                if new_path is not None or self.path is None:
+                    self.path = new_path
+                    self._publish_path()
+            self.plan = None
+        if self.path is not None or self.plan is not None or wall_now < self.next_plan:
+            return
+        if self.returning_home:
+            previous_goal = None
+            target_goal = self.start_pose[:2]
+        elif self.replan_goal is not None:
+            previous_goal = None
+            target_goal = self.replan_goal
+            self.replan_goal = None
+        else:
+            goal = self.path[-1] if self.path is not None else None
+            previous_goal = goal
+            target_goal = None
+        self.plan = self.planner.submit(
+            plan_frontier, self.grid, self.pose, self.hits, previous_goal,
+            target_goal)
+        self.discard_plan = False
+        self.next_plan = wall_now + 0.6
 
-        # INVERTED cost: cells NEAR obstacles = high cost, FAR = zero cost.
-        # Penalty tapers quadratically to zero at PENALTY_RADIUS cells away.
-        # Beyond that radius, cost is 0 → pure shortest-path behavior.
-        PENALTY_RADIUS = 20.0  # cells (~1 m at 0.05 m resolution)
-        ratio = np.clip((PENALTY_RADIUS - dist) / PENALTY_RADIUS, 0.0, 1.0)
-        cost_map = (ratio * ratio * 100).astype(np.uint8)  # quadratic falloff
-        return cost_map
+    def _command(self, speed=0.0, turn=0.0):
+        cmd = Twist()
+        cmd.linear.x = float(speed)
+        cmd.angular.z = float(turn)
+        self.cmd_pub.publish(cmd)
 
-    @staticmethod
-    def a_star(mapdata, cost_map, start, goal):
-        COST_MAP_WEIGHT = 0.5  # gentle wall-avoidance bias
-        if not PathPlanner.is_cell_walkable(mapdata, start): return (None, None, start, goal)
-        if not PathPlanner.is_cell_walkable(mapdata, goal): return (None, None, start, goal)
+    def _drive(self):
+        wall_now = time.monotonic()
+        if not self.returning_home and not frontier_is_productive(
+                self.grid, self.path[-1]):
+            self._clear_path()
+            self._command()
+            return
+        distances = np.linalg.norm(self.path - self.pose[:2], axis=1)
+        if distances[-1] <= 0.15:
+            if self.returning_home:
+                self.home_reached = True
+            self._clear_path()
+            self._command()
+            return
+        command = command_for_path(
+            self.path, self.pose, self.max_speed, self.max_turn,
+            self.grid, self.hits)
+        if command is not None:
+            self._command(*command)
+            self._blocked_count = 0
+            return
+        self._blocked_count += 1
+        if self._blocked_count >= 3:
+            self.replan_goal = tuple(self.path[-1])
+            self._clear_path()
+            self.next_plan = wall_now
+        self._command()
 
-        pq = PriorityQueue()
-        pq.put(start, 0)
+    def _set_status(self, status):
+        if status != self.status:
+            self.get_logger().info(status)
+            self.status = status
 
-        cost_so_far = {start: 0}
-        distance_cost_so_far = {start: 0}
-        came_from = {start: None}
+    def _tick(self):
+        wall_now = time.monotonic()
+        now = self.get_clock().now().nanoseconds
+        self._update_obstacles(now, wall_now)
+        self._publish_frontiers()
+        if (self.tracking_time is None or wall_now - self.tracking_time > 0.6
+                or self.pose is None or not self._fresh(self.pose_time, now, wall_now, 0.5)
+                or self.hits is None or not self._fresh(self.scan_time, now, wall_now, 0.5)
+                or self.grid is None or not self._fresh(self.grid_time, now, wall_now, 2.0)):
+            self._command()
+            self._clear_path()
+            self._set_status('Waiting for valid localization, LiDAR and map data.')
+            return
+        if self.start_pose is None:
+            self.start_pose = self.pose
+        self._update_path(wall_now)
+        if self.home_reached:
+            self._command()
+            self._set_status('Returned to the starting position.')
+            return
+        if self.path is None:
+            self._no_path_count += 1
+            if self._no_path_count > 10:
+                if self._spin_start_time is None:
+                    self._spin_start_time = wall_now
+                elapsed = wall_now - self._spin_start_time
+                if elapsed < self._spin_duration:
+                    turn_speed = 0.5
+                    if motion_is_clear(self.grid, self.pose, self.hits, 0.0, turn_speed):
+                        self._command(0.0, turn_speed)
+                    else:
+                        self._command(0.0, 0.0)
+                    self._set_status('Scanning surroundings for frontiers.')
+                    return
+                else:
+                    self.returning_home = True
+                    self._spin_start_time = None
+                    self._set_status('Returning to the starting position.')
+                    return
+            self._command()
+            self._set_status('Looking for a reachable frontier.')
+            return
+        self._no_path_count = 0
+        self._spin_start_time = None
+        self._set_status('Exploring a reachable frontier.')
+        self._drive()
 
-        while not pq.empty():
-            current = pq.get()
-            if current == goal: break
 
-            for neighbor, distance in PathPlanner.neighbors_and_distances_of_8(mapdata, current):
-                added_cost = distance + COST_MAP_WEIGHT * cost_map[neighbor[1]][neighbor[0]]
-                new_cost = cost_so_far[current] + added_cost
-                if neighbor not in cost_so_far or new_cost < cost_so_far[neighbor]:
-                    cost_so_far[neighbor] = new_cost
-                    distance_cost_so_far[neighbor] = distance_cost_so_far[current] + distance
-                    priority = new_cost + PathPlanner.euclidean_distance(neighbor, goal)
-                    pq.put(neighbor, priority)
-                    came_from[neighbor] = current
-
-        # Guard: if goal was never reached / expanded, no valid path exists
-        if goal not in came_from:
-            return (None, None, start, goal)
-
-        path = []
-        cell = goal
-        while cell:
-            path.append(cell)
-            if cell in came_from:
-                cell = came_from[cell]
-            else:
-                return (None, None, start, goal)
-        path.reverse()
-
-        if len(path) < 5: 
-            return (None, None, start, goal)
-            
-        chop_length = min(4, len(path) - 1)
-        if chop_length > 0:
-            path = path[:-chop_length]
-
-        final_cost = distance_cost_so_far.get(goal, float('inf'))
-        return (path, final_cost, start, goal)
-
-    @staticmethod
-    def path_to_message(mapdata: OccupancyGrid, path: "list[tuple[int, int]]", timestamp) -> Path:
-        poses = PathPlanner.path_to_poses(mapdata, path)
-        path_msg = Path()
-        path_msg.header.frame_id = "odom"
-        path_msg.header.stamp = timestamp
-        path_msg.poses = poses
-        return path_msg
+def main(args=None):
+    """Run exploration and stop the robot when the node shuts down."""
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    node = AutonomousExplorer()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if rclpy.ok():
+            node._command()
+        node.planner.shutdown(wait=True, cancel_futures=True)
+        node.destroy_node()
+        rclpy.try_shutdown()

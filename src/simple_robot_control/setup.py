@@ -26,9 +26,7 @@ setup(
             'mapper_node = simple_robot_control.mapper_node:main',
             'ekf_node = simple_robot_control.extended_kalman_filter:main',
             'lidar_odom = simple_robot_control.lidar_odom:main',
-            'frontier_explorer = simple_robot_control.frontier_explorer:main',
-            'pure_pursuit = simple_robot_control.pure_pursuit:main',
-            # 'vizualize_matplotlib = simple_robot_control.vizualize_matplotlib:main'
+            'path_planner = simple_robot_control.path_planner:main',
             'vizualize = simple_robot_control.vizualize:main'
         ],
     },
