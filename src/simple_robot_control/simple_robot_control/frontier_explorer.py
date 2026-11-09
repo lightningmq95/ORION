@@ -1,442 +1,100 @@
-#!/usr/bin/env python3
 # Authors: Akash Mohapatra, Manas Chintawar
 
-import math
-import time
-from dataclasses import dataclass, field
-
-import cv2
-
-from geometry_msgs.msg import Point, PoseStamped
-
-from nav_msgs.msg import OccupancyGrid, Odometry, Path
-
-import numpy as np
+#!/usr/bin/env python3
 
 import rclpy
-from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
-from rclpy.time import Time
-from tf2_ros import Buffer, TransformException, TransformListener
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from geometry_msgs.msg import Point, PoseStamped
+from visualization_msgs.msg import Marker, MarkerArray
+from dataclasses import dataclass
+from collections import deque
+import math
 
 from simple_robot_control.path_planner import PathPlanner
-
-from std_msgs.msg import Bool, Empty
-
-from visualization_msgs.msg import Marker, MarkerArray
 
 
 @dataclass
 class Frontier:
     size: int
     centroid: Point
-    cells: np.ndarray | None = field(default=None, repr=False, compare=False)
-    approach: Point | None = None
-    status: str = 'blocked'
-
-
-@dataclass
-class FrontierExclusion:
-    point: Point
-    expires: float
-    signature: bytes
 
 
 class FrontierExplorer(Node):
 
     # ── tuning ──────────────────────────────────────────────────────
-    # metres; margin to mark a goal as reached (must be > grid resolution)
-    GOAL_REACHED_DIST = 0.35
-    # in seconds; Min cooldown time to look for new goals
-    REPLAN_COOLDOWN_S = 2.0
-    # Min number of contiguous edge cells to make a valid frontier
-    MIN_FRONTIER_SIZE = 8
-    # After max explore failures it concludes that the map is fully explored
-    # and returns home
-    NUM_EXPLORE_FAILS = 15
-    # Bound each shared search; try the next batch if a route is unavailable.
-    PLAN_BATCH_SIZE = 5
-    FRONTIER_SPAN_M = 1.0
-    FRONTIER_REACHED_DIST = 0.30
-    VISITED_RADIUS_M = 0.30
-    APPROACH_RANGE_M = 0.65
-    BLOCKED_RETRY_S = 30.0
-    # seconds of NO PROGRESS before giving up (path-index based)
-    GOAL_TIMEOUT_S = 15.0
-    # Actual minimum inflation is derived from robot geometry and resolution.
-    DEFAULT_KERNEL_SIZE = 1
+    GOAL_REACHED_DIST   = 0.35    # metres; margin to mark a goal as reached (must be > grid resolution)
+    REPLAN_COOLDOWN_S   = 2.0   # in seconds; Min cooldown time to look for new goals
+    CURRENT_GOAL_BONUS  = 0.95  # A bonus given to the bot when it reaches a goal pose
+    MIN_FRONTIER_SIZE   = 8     # Min number of contiguous edge cells to make a valid frontier
+    NUM_EXPLORE_FAILS   = 15    # After max explore failures it concludes that the map is fully explored and returns home
+    TOP_K_FRONTIERS     = 5     # detected 100 frontiers, it chooses top K to reduce CPU load
+    GOAL_TIMEOUT_S      = 15.0  # seconds of NO PROGRESS before giving up (path-index based)
+    DEFAULT_KERNEL_SIZE = 18    # Cspace thickness
     # ────────────────────────────────────────────────────────────────
 
     def __init__(self):
         super().__init__('frontier_explorer')
 
-        self.robot_length = self.declare_parameter('robot_length', 0.46).value
-        self.robot_width = self.declare_parameter('robot_width', 0.34).value
-        self.safety_margin = self.declare_parameter(
-            'safety_margin', 0.06).value
-        self._localization_valid = False
-        self._localization_received = None
-        self._localization_paused = False
-        self._runtime_replan = False
-        self._last_runtime_replan = -math.inf
-        self._blocked_goal = None
-        self._blocked_position = None
-        self._blocked_retries = 0
-        self._recovering_start = False
-        self._local_recovery_needed = False
-        self._local_recovery_received = -math.inf
-        self._recovery_failed = False
+        self.path_pub   = self.create_publisher(Path,        '/pure_pursuit/path', 10)
+        self.marker_pub = self.create_publisher(MarkerArray, '/frontiers_vis',     10)
 
-        self.path_pub = self.create_publisher(Path, '/pure_pursuit/path', 10)
-        self.marker_pub = self.create_publisher(
-            MarkerArray, '/frontiers_vis', QoSProfile(
-                depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        self.heartbeat_pub = self.create_publisher(
-            Empty, '/navigation/heartbeat', 1)
-        self.recovery_pub = self.create_publisher(
-            Bool, '/navigation/recover_start', 1)
+        self.create_subscription(Odometry,      '/odom_fused', self.odom_callback, 10)
+        self.create_subscription(OccupancyGrid, '/map',        self.map_callback,  10)
+        self.create_subscription(PoseStamped,   '/goal_pose',  self.goal_pose_callback, 10)
 
-        self.create_subscription(
-            Odometry, '/odom_fused', self.odom_callback, 10)
-        self.create_subscription(
-            OccupancyGrid, '/map', self.map_callback, 10)
-        self.create_subscription(
-            PoseStamped, '/goal_pose', self.goal_pose_callback, 10)
-        self.create_subscription(
-            Bool, '/navigation/blocked', self.blocked_callback, 1)
-        self.create_subscription(
-            Bool, '/navigation/recovery_needed', self.recovery_needed_callback, 1)
-        self.create_subscription(
-            Bool, '/navigation/recovery_failed', self.recovery_failed_callback, 1)
-        self.create_subscription(
-            Bool, '/localization/tracking_valid', self.tracking_callback, 1)
-
-        self.pose = None
-        self.mapdata = None
-        self._map_array = None
-        self._map_geometry = None
-        self._cost_map = None
-        self._cspace_array = None
-        self._cspace_kernel = None
-        self._planning_grid = None
-        self._planning_kernel = None
-        self._free_mask = None
-        self._free_labels = None
-        self._frontier_cache = {}
-        self._path_array = np.empty((0, 2), dtype=np.float64)
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-        self.body_bounds = (-0.20, 0.22, -0.17, 0.17)
-        self._tf_geometry_initialized = False
+        self.pose       = None
+        self.mapdata    = None
 
         # ── state management ────────────────────────────────────────
-        self.initial_pose: Point | None = None
-        self.returning_home = False
-
-        self.current_goal_centroid: Point | None = None
-        self.last_replan_time = self.get_clock().now()
-        self.goal_start_time = self.get_clock().now()
-        # reset when robot advances along path
-        self.last_progress_time = time.monotonic()
-        # furthest path cell index reached
-        self.best_path_idx = 0
+        self.initial_pose: Point | None = None           
+        self.returning_home = False                      
+        
+        self.current_goal_centroid: Point | None = None  
+        self.last_replan_time    = self.get_clock().now()
+        self.goal_start_time     = self.get_clock().now()
+        self.last_progress_time  = self.get_clock().now()   # reset when robot advances along path
+        self.best_path_idx       = 0                         # furthest path cell index reached
         self.no_frontiers_found_counter = 0
         self.is_finished_exploring = False
-        # Frontier completion persists while accepting later manual commands.
-        self.exploration_complete = False
-
+        
         # --- Squeeze Mode State Variables ---
-        self.return_home_fails = 0
+        self.return_home_fails = 0 
         self.user_goal_fails = 0
-        # Holds the reduced kernel size while driving
-        self.active_kernel = self.DEFAULT_KERNEL_SIZE
-
+        self.active_kernel = self.DEFAULT_KERNEL_SIZE  # Holds the reduced kernel size while driving
+        
         self.user_goal_centroid: Point | None = None
-        self._manual_resume_exploration = False
-        self._resume_frontier_centroid: Point | None = None
+        self.pre_manual_pose: Point | None = None  # saved position before manual override
+        
+        self.blacklisted_centroids = []
+        self.current_path = []  # grid cells of the active path (for obstacle checking)
 
-        self._frontier_exclusions = []
-        # grid cells of the active path (for obstacle checking)
-        self.current_path = []
-
-        # Renew watchdog/recovery leases in wall time, even when Gazebo runs
-        # below real time. Mission progress timestamps still use the ROS clock.
-        self._timer_clock = Clock(clock_type=ClockType.STEADY_TIME)
-        self.timer = self.create_timer(
-            0.5, self.explore_loop, clock=self._timer_clock)
-        self.heartbeat_timer = self.create_timer(
-            0.25, self._publish_heartbeat, clock=self._timer_clock)
-        self.marker_timer = self.create_timer(1.0, self._refresh_markers)
-        self.get_logger().info('Frontier Explorer started.')
+        self.timer = self.create_timer(1.0, self.explore_loop)
+        self.get_logger().info("Frontier Explorer started.")
 
     # ── callbacks ───────────────────────────────────────────────────
 
-    def _publish_heartbeat(self):
-        self.heartbeat_pub.publish(Empty())
-
-    def _update_body_geometry_from_tf(self):
-        """Extract physical robot body dimensions and bounds from the TF2 tree."""
-        if self._tf_geometry_initialized:
-            return
-        links = [
-            'base_link', 'left_wheel', 'right_wheel', 'caster_wheel',
-            'camera_left_link', 'camera_right_link', 'lidar_link'
-        ]
-        extents = {
-            'base_link': (0.20, 0.15),
-            'left_wheel': (0.05, 0.02),
-            'right_wheel': (0.05, 0.02),
-            'caster_wheel': (0.025, 0.025),
-            'camera_left_link': (0.015, 0.04),
-            'camera_right_link': (0.015, 0.04),
-            'lidar_link': (0.05, 0.05),
-        }
-        xs, ys = [], []
-        for link in links:
-            try:
-                trans = self.tf_buffer.lookup_transform(
-                    'base_footprint', link, Time()).transform
-                tx, ty = trans.translation.x, trans.translation.y
-                hx, hy = extents.get(link, (0.02, 0.02))
-                xs.extend([tx - hx, tx + hx])
-                ys.extend([ty - hy, ty + hy])
-            except Exception:
-                continue
-        if xs and ys:
-            self.body_bounds = (min(xs), max(xs), min(ys), max(ys))
-            self.robot_length = max(xs) - min(xs)
-            self.robot_width = max(ys) - min(ys)
-            self._tf_geometry_initialized = True
-            self.get_logger().info(
-                f'Robot body dynamics from TF2: length={self.robot_length:.2f}m, '
-                f'width={self.robot_width:.2f}m, bounds={self.body_bounds}')
-
-    def _request_start_recovery(self, active):
-        # True is a short lease renewed by explore_loop, not a motion command.
-        # The controller still checks sensors and each swept/braking footprint.
-        if active or getattr(self, '_recovering_start', False):
-            self.recovery_pub.publish(Bool(data=active))
-        self._recovering_start = active
-
-    def recovery_needed_callback(self, msg):
-        self._local_recovery_needed = bool(msg.data)
-        self._local_recovery_received = time.monotonic()
-
-    def recovery_failed_callback(self, msg):
-        if msg.data:
-            self._recovery_failed = True
-
-    def _begin_start_recovery(self):
-        if not self._recovering_start:
-            if self.current_goal_centroid is not None:
-                self._resume_frontier_centroid = self.current_goal_centroid
-                self.current_goal_centroid = None
-            self.get_logger().warning(
-                'Current pose needs clearance recovery; preserving the mission '
-                'while the controller finds a checked escape.')
-        self._recovery_failed = False
-        self._runtime_replan = False
-        self.current_path = []
-        self._publish_stop()
-        self._request_start_recovery(True)
-
-    def tracking_callback(self, msg):
-        self._localization_valid = bool(msg.data)
-        self._localization_received = time.monotonic()
-        if not self._localization_valid:
-            self._request_start_recovery(False)
-            self._localization_paused = True
-            self._runtime_replan = False
-            if self.current_path:
-                self.current_path = []
-                self._publish_stop()
-
-    def _tracking_ready(self):
-        return (self._localization_valid
-                and self._localization_received is not None
-                and time.monotonic() - self._localization_received <= 0.75)
-
-    def _publish_stop(self):
-        message = Path()
-        message.header.frame_id = (
-            self.mapdata.header.frame_id if self.mapdata is not None
-            else 'odom') or 'odom'
-        message.header.stamp = self.get_clock().now().to_msg()
-        self.path_pub.publish(message)
-
-    def blocked_callback(self, msg):
-        """Cancel an unsafe route immediately and request a bounded replan."""
-        now = time.monotonic()
-        if (not msg.data or not self.current_path
-                or now - self._last_runtime_replan < self.REPLAN_COOLDOWN_S):
-            return
-        self._last_runtime_replan = now
-        self._runtime_replan = self._tracking_ready()
-        self.current_path = []
-        self._publish_stop()
-
-    def _handle_runtime_replan(self):
-        self._runtime_replan = False
-        goal = (self.user_goal_centroid if self.user_goal_centroid is not None
-                else self.initial_pose if self.returning_home
-                else self.current_goal_centroid)
-        position = self.pose.position
-        same_goal = (goal is not None and self._blocked_goal is not None
-                     and math.hypot(goal.x - self._blocked_goal.x,
-                                    goal.y - self._blocked_goal.y) < 1.0)
-        no_progress = (self._blocked_position is not None
-                       and math.hypot(position.x - self._blocked_position.x,
-                                      position.y - self._blocked_position.y)
-                       < 0.25)
-        if same_goal and no_progress:
-            self._blocked_retries += 1
-        else:
-            self._blocked_goal = goal
-            self._blocked_position = Point(x=position.x, y=position.y)
-            self._blocked_retries = 1
-        self.best_path_idx = 0
-        if self._blocked_retries >= 3:
-            self.get_logger().warning(
-                'Repeated local blockage without progress; cancelling goal.')
-            if self.user_goal_centroid is not None:
-                self._finish_manual_goal()
-                return False
-            if self.returning_home:
-                self.returning_home = False
-                self.is_finished_exploring = True
-                self._publish_stop()
-                return False
-            if goal is not None:
-                self._exclude_frontier_goal(goal, reached=False)
-            self._resume_frontier_centroid = None
-        elif self.current_goal_centroid is not None:
-            self._resume_frontier_centroid = self.current_goal_centroid
-        self.current_goal_centroid = None
-        return True
-
     def goal_pose_callback(self, msg: PoseStamped):
-        self._request_start_recovery(False)
-        self._blocked_retries = 0
-        self._blocked_goal = None
-        self._runtime_replan = False
-        if self.user_goal_centroid is None:
-            # Capture the mission phase only once, even if the user replaces
-            # a manual waypoint before reaching it.
-            if self.returning_home or self.is_finished_exploring:
-                self.exploration_complete = True
-            self._manual_resume_exploration = not self.exploration_complete
-            if (self._manual_resume_exploration
-                    and self.current_goal_centroid is not None):
-                goal = self.current_goal_centroid
-                self._resume_frontier_centroid = Point(
-                    x=goal.x, y=goal.y, z=goal.z)
-            elif not self._manual_resume_exploration:
-                self._resume_frontier_centroid = None
-
         self.user_goal_centroid = msg.pose.position
-        self.current_path = []
-        self._publish_stop()
-
+        
+        # Save where the robot currently is so we can return after the manual goal
+        if self.pose is not None:
+            self.pre_manual_pose = Point(
+                x=self.pose.position.x,
+                y=self.pose.position.y,
+                z=0.0
+            )
+        
         # Reset fails and kernel when a new goal is clicked
         self.user_goal_fails = 0
-        self.active_kernel = self.DEFAULT_KERNEL_SIZE
-
-        self.get_logger().info(
-            'Manual Override: Navigating to '
-            f'({self.user_goal_centroid.x:.2f}, '
-            f'{self.user_goal_centroid.y:.2f})')
-
+        self.active_kernel = self.DEFAULT_KERNEL_SIZE 
+        
+        self.get_logger().info(f"Manual Override: Navigating to ({self.user_goal_centroid.x:.2f}, {self.user_goal_centroid.y:.2f})")
+        
         self.is_finished_exploring = False
         self.returning_home = False
         self.no_frontiers_found_counter = 0
         self.current_goal_centroid = None
-
-    def _finish_manual_goal(self):
-        """Restore the interrupted mission phase after any manual outcome."""
-        self._request_start_recovery(False)
-        self.current_path = []
-        self._publish_stop()
-        self.user_goal_centroid = None
-        self.current_goal_centroid = None
-        self.active_kernel = self.DEFAULT_KERNEL_SIZE
-        self.user_goal_fails = 0
-        self.return_home_fails = 0
-        self.returning_home = False
-        self.best_path_idx = 0
-        self.no_frontiers_found_counter = 0
-        resume = (self._manual_resume_exploration
-                  and not self.exploration_complete)
-        if resume:
-            start = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
-            remaining = self.search_frontiers(start)
-            self._evaluate_frontiers(
-                remaining, self._prepare_planning_grid(), start)
-            pending = bool(remaining) and any(
-                math.isfinite(item.expires) for item in self._frontier_exclusions)
-            if not any(f.approach is not None for f in remaining) and not pending:
-                # The detour can finish the map, or arrive during the normal
-                # no-frontier retry window. The manual waypoint is then the
-                # final destination rather than a trigger for a trip home.
-                self.exploration_complete = True
-                resume = False
-        self.is_finished_exploring = not resume
-        self._manual_resume_exploration = False
-        if resume:
-            self.get_logger().info('Resuming frontier exploration.')
-        else:
-            self._resume_frontier_centroid = None
-            self.get_logger().info(
-                'Exploration is complete. Staying at the current position.')
-
-    def _resume_frontier_path(self, frontiers, planner, start_cell):
-        """Replan to an interrupted frontier if it remains reachable."""
-        saved_goal = self._resume_frontier_centroid
-        self._resume_frontier_centroid = None
-        if saved_goal is None:
-            return None, None
-        nearby = [
-            frontier for frontier in frontiers
-            if frontier.approach is not None
-            and math.hypot(frontier.approach.x - saved_goal.x,
-                           frontier.approach.y - saved_goal.y) < 1.0
-        ]
-        if not nearby:
-            return None, None
-        frontier = min(nearby, key=lambda f: math.hypot(
-            f.approach.x - saved_goal.x, f.approach.y - saved_goal.y))
-        goal_cell = PathPlanner.world_to_grid(self.mapdata, frontier.approach)
-        path, _, _, _ = planner.a_star(start_cell, goal_cell)
-        if not path or not PathPlanner.check_body_traversability(
-                self.mapdata, path, self.body_bounds):
-            return None, None
-        return path, frontier.approach
-
-    def _local_map_signature(self, point):
-        """Only topology changes near a visited viewpoint make it worth retrying."""
-        x, y = PathPlanner.world_to_grid(self.mapdata, point)
-        radius = math.ceil(self.APPROACH_RANGE_M / self.mapdata.info.resolution)
-        height, width = self._map_array.shape
-        patch = self._map_array[max(0, y - radius):min(height, y + radius + 1),
-                                max(0, x - radius):min(width, x + radius + 1)]
-        return ((patch >= 50).astype(np.uint8)
-                + 2 * (patch == -1).astype(np.uint8)).tobytes()
-
-    def _exclude_frontier_goal(self, point, reached):
-        self._frontier_exclusions.append(FrontierExclusion(
-            point=point,
-            expires=(math.inf if reached
-                     else time.monotonic() + self.BLOCKED_RETRY_S),
-            signature=self._local_map_signature(point)))
-
-    def _prune_frontier_exclusions(self):
-        now = time.monotonic()
-        self._frontier_exclusions = [
-            item for item in self._frontier_exclusions
-            if item.expires > now
-            and (math.isfinite(item.expires)
-                 or item.signature == self._local_map_signature(item.point))
-        ]
 
     def odom_callback(self, msg: Odometry):
         self.pose = msg.pose.pose
@@ -447,211 +105,62 @@ class FrontierExplorer(Node):
             self.initial_pose.z = self.pose.position.z
 
     def map_callback(self, msg: OccupancyGrid):
-        if (msg.info.width <= 0 or msg.info.height <= 0
-                or msg.info.resolution <= 0.0
-                or len(msg.data) != msg.info.width * msg.info.height):
-            self.get_logger().warning(
-                'Ignoring an empty or invalid occupancy grid.')
-            return
-        grid = np.asarray(msg.data, dtype=np.int8).reshape(
-            msg.info.height, msg.info.width)
-        origin = msg.info.origin
-        geometry = (
-            msg.info.width, msg.info.height, msg.info.resolution,
-            origin.position.x, origin.position.y,
-            origin.orientation.x, origin.orientation.y,
-            origin.orientation.z, origin.orientation.w, msg.header.frame_id)
-        unchanged = (geometry == self._map_geometry
-                     and np.array_equal(grid, self._map_array))
-        if self._map_geometry is not None and geometry != self._map_geometry:
-            # Grid cells of an existing route no longer identify the same
-            # places.
-            self.current_path = []
-            self.current_goal_centroid = None
-            self._frontier_exclusions.clear()
-            self._publish_stop()
         self.mapdata = msg
-        if unchanged:
-            return
-        self._map_array = grid
-        self._map_geometry = geometry
-        self._cost_map = None
-        self._cspace_array = None
-        self._cspace_kernel = None
-        self._planning_grid = None
-        self._planning_kernel = None
-        self._free_mask = None
-        self._free_labels = None
-        self._frontier_cache = {}
 
     # ── frontier detection ──────────────────────────────────────────
 
     def search_frontiers(self, start_cell):
-        """Label reachable free space and its unknown boundary in OpenCV."""
-        grid = self._map_array
-        if self._free_mask is None:
-            self._free_mask = (grid >= 0) & (grid < 50)
-        free = self._free_mask
-        start_cell = self._nearest_walkable(free, start_cell)
-        if start_cell is None:
-            return []
-        if self._free_labels is None:
-            _, self._free_labels = cv2.connectedComponents(
-                free.astype(np.uint8), connectivity=4)
-        component = int(self._free_labels[start_cell[1], start_cell[0]])
-        if component in self._frontier_cache:
-            return self._frontier_cache[component]
-
-        reachable = (self._free_labels == component).astype(np.uint8)
-        cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
-        boundary = ((grid == -1) & (cv2.dilate(reachable, cross) != 0))
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(
-            boundary.astype(np.uint8), connectivity=8)
+        queue   = deque([start_cell])          
+        visited = {start_cell}
+        is_frontier: dict = {}
         frontiers = []
-        span = max(1, round(self.FRONTIER_SPAN_M / self.mapdata.info.resolution))
-        for label in range(1, count):
-            x, y, width, height, size = stats[label]
-            if size < self.MIN_FRONTIER_SIZE:
-                continue
-            ys, xs = np.nonzero(labels[y:y + height, x:x + width] == label)
-            xs += x
-            ys += y
-            # One long/curved boundary needs several viewpoints. A single
-            # centroid can sit behind a corner or hide an entire opening
-            # after one visit. Apply the noise threshold to the whole edge,
-            # then retain every cell in spatially bounded segments.
-            cells = np.column_stack((xs, ys))
-            _, groups = np.unique(cells // span, axis=0, return_inverse=True)
-            for group in range(int(groups.max()) + 1):
-                segment = cells[groups == group]
-                center = segment.mean(axis=0)
-                best = np.argmin(np.sum((segment - center) ** 2, axis=1))
-                centroid = PathPlanner.grid_to_world(
-                    self.mapdata, tuple(map(int, segment[best])))
-                frontiers.append(Frontier(
-                    size=len(segment), centroid=centroid, cells=segment))
-        self._frontier_cache[component] = frontiers
+
+        while queue:
+            current = queue.popleft()
+            for neighbor in PathPlanner.neighbors_of_4(
+                    self.mapdata, current, must_be_walkable=False):
+                val = PathPlanner.get_cell_value(self.mapdata, neighbor)
+                if val >= 0 and neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+                elif self._is_new_frontier_cell(neighbor, is_frontier):
+                    is_frontier[neighbor] = True
+                    frontier = self._build_frontier(neighbor, is_frontier)
+                    if frontier.size >= self.MIN_FRONTIER_SIZE:
+                        frontiers.append(frontier)
         return frontiers
 
-    def _evaluate_frontiers(self, frontiers, planner, start_cell):
-        """Project every edge onto known, footprint-safe connected space."""
-        self._prune_frontier_exclusions()
-        reachable = planner.reachable_mask(start_cell)
-        known_free = (self._map_array >= 0) & (self._map_array < 50)
-        safe = reachable & known_free
-        resolution = self.mapdata.info.resolution
-        padding = math.ceil(self.APPROACH_RANGE_M / resolution)
-        height, width = safe.shape
-        robot = np.asarray(start_cell)
-        for frontier in frontiers:
-            frontier.approach = None
-            frontier.status = 'blocked'
-            cells = frontier.cells
-            if cells is None or not len(cells):
-                continue
-            x0, y0 = np.maximum(cells.min(axis=0) - padding, 0)
-            x1, y1 = np.minimum(cells.max(axis=0) + padding + 1,
-                                (width, height))
-            edge = np.ones((y1 - y0, x1 - x0), dtype=np.uint8)
-            edge[cells[:, 1] - y0, cells[:, 0] - x0] = 0
-            distances = cv2.distanceTransform(edge, cv2.DIST_L2, 5) * resolution
-            ys, xs = np.nonzero(
-                safe[y0:y1, x0:x1] & (distances <= self.APPROACH_RANGE_M))
-            if not len(xs):
-                continue
-            offsets = distances[ys, xs]
-            candidates = np.column_stack((xs + x0, ys + y0))
-            # Already visible from the robot's current viewpoint; avoid
-            # repeatedly issuing a goal that is immediately 'reached'.
-            eligible = (np.linalg.norm(candidates - robot, axis=1) * resolution
-                        > self.FRONTIER_REACHED_DIST + resolution)
-            for item in self._frontier_exclusions:
-                point = PathPlanner.world_to_grid(self.mapdata, item.point)
-                eligible &= (np.linalg.norm(candidates - point, axis=1)
-                             * resolution > self.VISITED_RADIUS_M)
-            if not np.any(eligible):
-                frontier.status = 'deferred'
-                continue
-            # Prefer a viewpoint just inside the edge, near this segment's
-            # centre. If that is inflated/blocked, use another safe part.
-            scores = (4.0 * np.abs(offsets - 0.12)
-                      + 0.25 * resolution * np.linalg.norm(
-                          candidates - cells.mean(axis=0), axis=1))
-            scores[~eligible] = np.inf
-            goal = tuple(map(int, candidates[np.argmin(scores)]))
-            frontier.approach = PathPlanner.grid_to_world(self.mapdata, goal)
-            frontier.status = 'reachable'
+    def _is_new_frontier_cell(self, cell, is_frontier):
+        if PathPlanner.get_cell_value(self.mapdata, cell) != -1 or cell in is_frontier:
+            return False
+        for n in PathPlanner.neighbors_of_4(
+                self.mapdata, cell, must_be_walkable=False):
+            if 0 <= PathPlanner.get_cell_value(self.mapdata, n) < 50:
+                return True
+        return False
 
-    @staticmethod
-    def _nearest_walkable(walkable, cell, radius=14):
-        """Find a free cell within the existing square search radius."""
-        x, y = cell
-        height, width = walkable.shape
-        if 0 <= x < width and 0 <= y < height and walkable[y, x]:
-            return cell
-        x0, x1 = max(0, x - radius), min(width, x + radius + 1)
-        y0, y1 = max(0, y - radius), min(height, y + radius + 1)
-        if x0 >= x1 or y0 >= y1:
-            return None
-        ys, xs = np.nonzero(walkable[y0:y1, x0:x1])
-        if not len(xs):
-            return None
-        xs += x0
-        ys += y0
-        best = int(np.argmin((xs - x) ** 2 + (ys - y) ** 2))
-        return int(xs[best]), int(ys[best])
+    def _build_frontier(self, initial_cell, is_frontier):
+        frontier_cells = [initial_cell]
+        is_frontier[initial_cell] = True
+        queue = deque([initial_cell])
 
-    def _get_cspace_walkable(self):
-        # Half-width inflation allows A* to explore all physically traversable openings;
-        # full body dynamics then verifies orientation and clearance along paths.
-        half_width_cells = math.ceil((self.robot_width / 2) / self.mapdata.info.resolution)
-        self._minimum_kernel = max(3, 2 * half_width_cells + 1)
-        self.active_kernel = max(self.active_kernel, self._minimum_kernel)
-        if (self._cspace_array is None
-                or self._cspace_kernel != self.active_kernel):
-            self._cspace_array = PathPlanner.calc_cspace_array(
-                self.mapdata, kernel_size=self.active_kernel,
-                grid=self._map_array)
-            self._cspace_walkable = (
-                (self._cspace_array >= 0) & (self._cspace_array < 50)
-                & (self._map_array >= 0))
-            self._cspace_kernel = self.active_kernel
-        return self._cspace_walkable
+        while queue:
+            current = queue.popleft()
+            for neighbor in PathPlanner.neighbors_of_8(
+                    self.mapdata, current, must_be_walkable=False):
+                if self._is_new_frontier_cell(neighbor, is_frontier):
+                    is_frontier[neighbor] = True
+                    frontier_cells.append(neighbor)
+                    queue.append(neighbor)
 
-    def _prepare_planning_grid(self):
-        self._get_cspace_walkable()
-        if self._cost_map is None:
-            self._cost_map = PathPlanner.calc_cost_map(
-                self.mapdata, grid=self._map_array)
-        if (self._planning_grid is None
-                or self._planning_kernel != self.active_kernel):
-            self._planning_grid = PathPlanner.prepare(
-                self.mapdata, self._cost_map, grid=np.where(
-                    self._map_array >= 0, self._cspace_array, -1))
-            self._planning_kernel = self.active_kernel
-        return self._planning_grid
-
-    @property
-    def current_path(self):
-        """Return the active route as grid cells."""
-        return self._current_path
-
-    @current_path.setter
-    def current_path(self, path):
-        """Replace the route and refresh its cached cell coordinates."""
-        self._current_path = path
-        self._path_array = np.asarray(path, dtype=np.float64).reshape(-1, 2)
-
-    def _publish_path(self, path, real_start, start_cell):
-        if not path:
-            self.current_path = []
-            self._publish_stop()
-            return
-        if start_cell != real_start or path[0] != real_start:
-            path = [real_start] + list(path)
-        self.current_path = path
-        self.path_pub.publish(PathPlanner.path_to_message(
-            self.mapdata, path, self.get_clock().now().to_msg()))
+        size = len(frontier_cells)
+        avg_x = sum(c[0] for c in frontier_cells) / size
+        avg_y = sum(c[1] for c in frontier_cells) / size
+        
+        best_cell = min(frontier_cells, key=lambda c: (c[0]-avg_x)**2 + (c[1]-avg_y)**2)
+        centroid = PathPlanner.grid_to_world(self.mapdata, best_cell)
+        
+        return Frontier(size=size, centroid=centroid)
 
     # ── helpers ─────────────────────────────────────────────────────
 
@@ -662,24 +171,45 @@ class FrontierExplorer(Node):
         dy = self.pose.position.y - p.y
         return math.hypot(dx, dy)
 
-    def _is_path_blocked(self, nearest_idx=None, use_cspace=False) -> bool:
-        """Check whether actual obstacles block the stored path ahead using body dynamics."""
+    def _goal_still_valid(self, frontiers) -> bool:
+        if self.current_goal_centroid is None:
+            return False
+        for f in frontiers:
+            if math.hypot(f.centroid.x - self.current_goal_centroid.x,
+                          f.centroid.y - self.current_goal_centroid.y) < 1.0:
+                return True
+        return False
+
+    def _seconds_since_replan(self) -> float:
+        dt = self.get_clock().now() - self.last_replan_time
+        return dt.nanoseconds * 1e-9
+
+    def _is_path_blocked(self) -> bool:
+        """Check if the stored path ahead of the robot is now blocked by new obstacles."""
         if not self.current_path or self.mapdata is None or self.pose is None:
             return False
 
-        if nearest_idx is None:
-            nearest_idx = self._get_nearest_path_idx()
-        ahead = self._path_array[nearest_idx:]
-        if not len(ahead):
-            return False
-        xs, ys = ahead[:, 0] + 0.5, ahead[:, 1] + 0.5
-        height, width = self._map_array.shape
-        if np.any((xs < 0) | (xs >= width) | (ys < 0) | (ys >= height)):
-            return True
-        return not PathPlanner.check_body_traversability(
-            self.mapdata, ahead, self.body_bounds, margin=0.01)
+        robot_cell = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
 
-    def _is_at_end_of_path(self, tolerance=None) -> bool:
+        # Find the nearest cell on the path to the robot
+        min_dist_sq = float('inf')
+        nearest_idx = 0
+        for i, cell in enumerate(self.current_path):
+            d_sq = (cell[0] - robot_cell[0]) ** 2 + (cell[1] - robot_cell[1]) ** 2
+            if d_sq < min_dist_sq:
+                min_dist_sq = d_sq
+                nearest_idx = i
+
+        # Only check path cells AHEAD of the robot (from nearest onward)
+        for cell in self.current_path[nearest_idx:]:
+            if not PathPlanner.is_cell_in_bounds(self.mapdata, cell):
+                return True
+            val = PathPlanner.get_cell_value(self.mapdata, cell)
+            if val >= 50:  # only actual obstacles block the path (not unknown cells)
+                return True
+        return False
+
+    def _is_at_end_of_path(self) -> bool:
         """Check if the robot has reached the end of the stored path.
         Used to detect when a truncated path has been completed so we can
         replan with updated map data instead of waiting for goal timeout."""
@@ -690,80 +220,91 @@ class FrontierExplorer(Node):
         dist = math.hypot(
             self.pose.position.x - last_world.x,
             self.pose.position.y - last_world.y)
-        return dist < (self.GOAL_REACHED_DIST if tolerance is None else tolerance)
+        return dist < self.GOAL_REACHED_DIST
 
     def _get_nearest_path_idx(self) -> int:
         """Return the index of the path cell closest to the robot."""
         if not self.current_path or self.pose is None or self.mapdata is None:
             return 0
-        robot_cell = PathPlanner.world_to_grid(
-            self.mapdata, self.pose.position)
-        offsets = self._path_array - robot_cell
-        return int(np.argmin(np.einsum('ij,ij->i', offsets, offsets)))
+        robot_cell = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
+        min_dist_sq = float('inf')
+        nearest_idx = 0
+        for i, cell in enumerate(self.current_path):
+            d_sq = (cell[0] - robot_cell[0]) ** 2 + (cell[1] - robot_cell[1]) ** 2
+            if d_sq < min_dist_sq:
+                min_dist_sq = d_sq
+                nearest_idx = i
+        return nearest_idx
+
+    def _truncate_at_blind_turns(self, path):
+        """Cut the path at the first significant heading change that borders
+        unmapped (unknown) cells.  This forces the robot to approach unknown
+        regions head-on so the LiDAR can map obstacles on all sides before
+        the robot commits to a turn whose outcome is invisible.
+
+        Returns the (possibly shortened) path.
+        """
+        HEADING_WINDOW  = 3             # cells to average heading over
+        ANGLE_THRESHOLD = math.pi / 4   # 45° counts as a significant turn
+        UNKNOWN_RADIUS  = 5             # cell radius to scan for unknown space
+        MIN_KEEP        = 8             # always keep at least this many cells
+
+        if len(path) < max(HEADING_WINDOW * 2 + 1, MIN_KEEP) or self.mapdata is None:
+            return path
+
+        for i in range(HEADING_WINDOW, len(path) - HEADING_WINDOW):
+            # Smoothed heading before and after point i
+            dx_in  = path[i][0] - path[i - HEADING_WINDOW][0]
+            dy_in  = path[i][1] - path[i - HEADING_WINDOW][1]
+            dx_out = path[i + HEADING_WINDOW][0] - path[i][0]
+            dy_out = path[i + HEADING_WINDOW][1] - path[i][1]
+
+            if (dx_in == 0 and dy_in == 0) or (dx_out == 0 and dy_out == 0):
+                continue
+
+            angle_in  = math.atan2(dy_in, dx_in)
+            angle_out = math.atan2(dy_out, dx_out)
+            turn = abs(angle_out - angle_in)
+            if turn > math.pi:
+                turn = 2.0 * math.pi - turn
+
+            if turn < ANGLE_THRESHOLD:
+                continue
+
+            # Significant turn found — check for unknown cells nearby
+            cx, cy = path[i]
+            has_unknown = False
+            for dx in range(-UNKNOWN_RADIUS, UNKNOWN_RADIUS + 1):
+                for dy in range(-UNKNOWN_RADIUS, UNKNOWN_RADIUS + 1):
+                    cell = (cx + dx, cy + dy)
+                    if (PathPlanner.is_cell_in_bounds(self.mapdata, cell)
+                            and PathPlanner.get_cell_value(self.mapdata, cell) == -1):
+                        has_unknown = True
+                        break
+                if has_unknown:
+                    break
+
+            if has_unknown:
+                # Keep a few cells before the turn so the robot has a target
+                cut_idx = max(MIN_KEEP, i - 2)
+                if cut_idx >= len(path):
+                    return path  # nothing useful to truncate
+                self.get_logger().info(
+                    f"Blind turn detected at path[{i}] near unknown space — "
+                    f"truncating {len(path)} → {cut_idx} cells "
+                    f"(approaching straight to let LiDAR map first).")
+                return path[:cut_idx]
+
+        return path
 
     # ── main loop ───────────────────────────────────────────────────
 
     def explore_loop(self):
-        if (self.is_finished_exploring
-                or self.pose is None or self.mapdata is None):
-            self._request_start_recovery(False)
+        if self.is_finished_exploring or self.pose is None or self.mapdata is None:
             return
-        self._update_body_geometry_from_tf()
-        if not self._tracking_ready():
-            self._request_start_recovery(False)
-            if self.current_path:
-                self.current_path = []
-                self._publish_stop()
-            self._localization_paused = True
-            return
-        if self._localization_paused:
-            self._localization_paused = False
-            self._runtime_replan = False
-            if self.current_goal_centroid is not None:
-                self._resume_frontier_centroid = self.current_goal_centroid
-                self.current_goal_centroid = None
-        real_start = PathPlanner.world_to_grid(
-            self.mapdata, self.pose.position)
-        start_cell = real_start
 
-        # A locally unsafe footprint is a start-pose problem, even when its
-        # cell passes circular inflation. Changing frontier goals cannot fix it.
-        local_recovery = (self._local_recovery_needed
-                          and time.monotonic() - self._local_recovery_received < 0.75)
-        if self._recovery_failed:
-            # The controller exhausted its recovery budget without escaping.
-            # Abandon the current goal that led here, shrink the C-space
-            # margin, and let the planner try a different frontier.
-            self._recovery_failed = False
-            self._request_start_recovery(False)
-            goal = (self._resume_frontier_centroid
-                    if self._resume_frontier_centroid is not None
-                    else self.current_goal_centroid)
-            if goal is not None:
-                self._exclude_frontier_goal(goal, reached=False)
-            self._resume_frontier_centroid = None
-            self.current_goal_centroid = None
-            self.current_path = []
-            self._publish_stop()
-            self.active_kernel = max(
-                self._minimum_kernel, self.active_kernel - 2)
-            self.get_logger().warning(
-                'Recovery failed; excluding goal and replanning with reduced '
-                f'C-space kernel {self.active_kernel}.')
-            # Fall through to pick a new goal.
-        elif self._recovering_start or local_recovery:
-            planner = self._prepare_planning_grid()
-            walkable_start = real_start if planner.is_walkable(real_start) else self._nearest_walkable(self._cspace_walkable, real_start)
-            if (walkable_start is None or not planner.is_walkable(walkable_start) or local_recovery):
-                self._begin_start_recovery()
-                return
-            self._request_start_recovery(False)
-            self._blocked_retries = 0
-            self._runtime_replan = False
-            self.last_progress_time = time.monotonic()
-            self.get_logger().info('Start clearance recovered; resuming route planning.')
-        if self._runtime_replan and not self._handle_runtime_replan():
-            return
+        real_start = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
+        start_cell = real_start
 
         # --- Commit to current frontier goal ---
         # Check if we've reached/timed out the goal, or if path is blocked.
@@ -771,357 +312,386 @@ class FrontierExplorer(Node):
         if (self.user_goal_centroid is None
                 and not self.returning_home
                 and self.current_goal_centroid is not None):
-
+            
             # Check: did we reach the goal?
-            if (self._dist_to_point(self.current_goal_centroid)
-                    < self.FRONTIER_REACHED_DIST):
-                self.get_logger().info(
-                    'Reached frontier viewpoint; evaluating the remaining edge.')
-                self._exclude_frontier_goal(
-                    self.current_goal_centroid, reached=True)
+            if self._dist_to_point(self.current_goal_centroid) < self.GOAL_REACHED_DIST:
+                self.get_logger().info("Reached frontier goal — blacklisting to prevent loops.")
+                self.blacklisted_centroids.append(self.current_goal_centroid)
                 self.current_goal_centroid = None
                 self.current_path = []
-                self._publish_stop()  # stop Pure Pursuit immediately
+                self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                 # Fall through to pick a new goal
-
+            
             # Check: is the robot making progress along the path?
             # Track which path cell the robot is nearest to; if the index
             # advances, the robot is following the path (even during U-turns
             # where Euclidean distance to the goal temporarily increases).
             else:
                 current_idx = self._get_nearest_path_idx()
-                # advanced by >2 cells
-                if current_idx > self.best_path_idx + 2:
+                if current_idx > self.best_path_idx + 2:  # advanced by >2 cells
                     self.best_path_idx = current_idx
-                    self.last_progress_time = time.monotonic()
+                    self.last_progress_time = self.get_clock().now()
 
-                stall_seconds = time.monotonic() - self.last_progress_time
+                stall_seconds = (self.get_clock().now() - self.last_progress_time).nanoseconds * 1e-9
 
                 if stall_seconds > self.GOAL_TIMEOUT_S:
-                    self.get_logger().warning(
-                        f'No path progress for {stall_seconds:.1f}s '
-                        f'(stuck at path cell {self.best_path_idx}/'
-                        f'{len(self.current_path)}). '
-                        f'Deferring this viewpoint and replanning.')
-                    self._exclude_frontier_goal(
-                        self.current_goal_centroid, reached=False)
+                    self.get_logger().warn(
+                        f"No path progress for {stall_seconds:.1f}s "
+                        f"(stuck at path cell {self.best_path_idx}/{len(self.current_path)}). "
+                        f"Blacklisting and replanning.")
+                    self.blacklisted_centroids.append(self.current_goal_centroid)
                     self.current_goal_centroid = None
                     self.current_path = []
                     self.best_path_idx = 0
-                    # stop Pure Pursuit immediately
-                    self._publish_stop()
+                    self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                     # Fall through to pick a new goal
-
+            
                 # Check: is the path blocked by a new obstacle?
-                elif self._is_path_blocked(current_idx, use_cspace=True):
-                    self.get_logger().warning(
-                        'Obstacle detected on path! Forcing immediate replan.')
-                    self._resume_frontier_centroid = self.current_goal_centroid
+                elif self._is_path_blocked():
+                    self.get_logger().warn("Obstacle detected on path! Forcing immediate replan.")
                     self.current_goal_centroid = None
                     self.current_path = []
                     self.best_path_idx = 0
-                    # stop Pure Pursuit immediately
-                    self._publish_stop()
+                    self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                     # Fall through to replan
-
-                # Check: have we completed a truncated path? (blind-turn safe
-                # approach)
-                # The robot reached the end of the path but is still far from
-                # the
-                # actual goal — replan now with the freshly-mapped
-                # surroundings.
-                elif self._is_at_end_of_path(self.FRONTIER_REACHED_DIST):
+                
+                # Check: have we completed a truncated path? (blind-turn safe approach)
+                # The robot reached the end of the path but is still far from the
+                # actual goal — replan now with the freshly-mapped surroundings.
+                elif self._is_at_end_of_path():
                     self.get_logger().info(
-                        'Reached end of route — '
-                        'replanning with updated map.')
+                        "Reached end of truncated path — replanning with updated map.")
                     self.current_goal_centroid = None
                     self.current_path = []
                     self.best_path_idx = 0
-                    # stop Pure Pursuit immediately
-                    self._publish_stop()
+                    self.path_pub.publish(Path())  # stop Pure Pursuit immediately
                     # Fall through to replan
-
+                
                 else:
-                    # Goal is active, path is clear, making progress — keep
-                    # going
+                    # Goal is active, path is clear, making progress — keep going
                     return
+        
+        # Calculate C-Space using the locked active_kernel
+        cspace   = PathPlanner.calc_cspace(self.mapdata, kernel_size=self.active_kernel)
+        cost_map = PathPlanner.calc_cost_map(self.mapdata)
 
-        # Check the actual requested target even when following a truncated
-        # path.
-        if self.user_goal_centroid is not None:
-            raw_goal_cell = PathPlanner.world_to_grid(
-                self.mapdata, self.user_goal_centroid)
-            if (PathPlanner.is_cell_in_bounds(self.mapdata, raw_goal_cell)
-                    and PathPlanner.get_cell_value(
-                        self.mapdata, raw_goal_cell) >= 50):
-                self.get_logger().error(
-                    'Manual goal is inside a known obstacle! Rejecting.')
-                self._finish_manual_goal()
-                return
-
-        # Manual/home routes can be followed until completion or a new
-        # obstacle,
-        # just like exploration routes, without running another search each
-        # second.
-        if ((self.user_goal_centroid is not None or self.returning_home)
-                and self.current_path):
-            if (not self._is_path_blocked(use_cspace=True)
-                    and not self._is_at_end_of_path()):
-                return
-            self.current_path = []
-            self._publish_stop()
-
-        if self.user_goal_centroid is None and not self.returning_home:
-            self.active_kernel = self.DEFAULT_KERNEL_SIZE
-        planner = self._prepare_planning_grid()
-        if not planner.is_walkable(real_start):
-            walkable_start = self._nearest_walkable(self._cspace_walkable, real_start)
-            if walkable_start is not None and planner.is_walkable(walkable_start):
-                start_cell = walkable_start
-            else:
-                self._begin_start_recovery()
-                return
-        else:
-            start_cell = real_start
-        if self._recovering_start:
-            self.get_logger().info(
-                'Start clearance recovered; resuming route planning.')
-        self._request_start_recovery(False)
+        # --- Escape the A* Start Trap ---
+        # Nudge to a walkable cell for planning, but remember the real position
+        if not PathPlanner.is_cell_walkable(cspace, start_cell):
+            found_start = False
+            for r in range(1, 15): 
+                for dx in range(-r, r + 1):
+                    for dy in range(-r, r + 1):
+                        if abs(dx) == r or abs(dy) == r:
+                            cand = (start_cell[0] + dx, start_cell[1] + dy)
+                            if PathPlanner.is_cell_walkable(cspace, cand):
+                                start_cell = cand
+                                found_start = True
+                                break
+                        if found_start: break
+                    if found_start: break
+                if found_start: break
 
         # ── MANUAL USER GOAL STATE ────────────────────────────────────
         if self.user_goal_centroid is not None:
-            # --- Nudge goal to nearest walkable cell in C-space ---
-            goal_cell = self._nearest_walkable(
-                self._cspace_walkable, raw_goal_cell)
-            if goal_cell is None:
+            # --- Safety Check: Reject goals placed directly inside known obstacles ---
+            raw_goal_cell = PathPlanner.world_to_grid(self.mapdata, self.user_goal_centroid)
+            if (PathPlanner.is_cell_in_bounds(self.mapdata, raw_goal_cell)
+                    and PathPlanner.get_cell_value(self.mapdata, raw_goal_cell) >= 50):
                 self.get_logger().error(
-                    'No walkable cell near manual goal! Rejecting.')
-                self._finish_manual_goal()
+                    "Manual goal is inside a known obstacle! Rejecting.")
+                self.current_path = []
+                self.path_pub.publish(Path())
+                self.user_goal_centroid = None
+                self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                self.user_goal_fails = 0
                 return
+
+            # --- Nudge goal to nearest walkable cell in C-space ---
+            goal_cell = raw_goal_cell
+            if not PathPlanner.is_cell_walkable(cspace, goal_cell):
+                found_goal = False
+                for r in range(1, 15):
+                    for dx in range(-r, r + 1):
+                        for dy in range(-r, r + 1):
+                            if abs(dx) == r or abs(dy) == r:
+                                cand = (goal_cell[0] + dx, goal_cell[1] + dy)
+                                if PathPlanner.is_cell_walkable(cspace, cand):
+                                    goal_cell = cand
+                                    found_goal = True
+                                    break
+                            if found_goal: break
+                        if found_goal: break
+                    if found_goal: break
+                if not found_goal:
+                    self.get_logger().error(
+                        "No walkable cell near manual goal! Rejecting.")
+                    self.current_path = []
+                    self.path_pub.publish(Path())
+                    self.user_goal_centroid = None
+                    self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                    self.user_goal_fails = 0
+                    return
 
             # Use the nudged world position for reach-distance checks
-            nudged_goal_world = PathPlanner.grid_to_world(
-                self.mapdata, goal_cell)
+            nudged_goal_world = PathPlanner.grid_to_world(self.mapdata, goal_cell)
 
             if self._dist_to_point(nudged_goal_world) < self.GOAL_REACHED_DIST:
-                self.get_logger().info('Manual waypoint reached!')
-                self._finish_manual_goal()
+                self.get_logger().info("Manual waypoint reached!")
+                self.current_path = []
+                self.path_pub.publish(Path())
+                self.user_goal_centroid = None
+                self.active_kernel = self.DEFAULT_KERNEL_SIZE  
+                self.user_goal_fails = 0
+                
+                # Check if frontiers remain to decide next action
+                if self.pre_manual_pose is not None:
+                    check_start = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
+                    frontiers = self.search_frontiers(check_start)
+                    valid_frontiers = [
+                        f for f in frontiers
+                        if not any(
+                            math.hypot(f.centroid.x - bc.x, f.centroid.y - bc.y) < 1.0
+                            for bc in self.blacklisted_centroids
+                        )
+                    ]
+                    
+                    if valid_frontiers:
+                        self.get_logger().info(
+                            f"Frontiers remaining! Returning to pre-override position "
+                            f"({self.pre_manual_pose.x:.2f}, {self.pre_manual_pose.y:.2f})")
+                        self.user_goal_centroid = self.pre_manual_pose
+                        self.pre_manual_pose = None
+                        return
+                    else:
+                        self.get_logger().info("No frontiers remaining. Staying at current position.")
+                        self.pre_manual_pose = None
+                        self.is_finished_exploring = True
+                        return
+                
                 return
 
-            path = PathPlanner.shortest_path(
-                self.mapdata, planner, start_cell, goal_cell,
-                self.body_bounds, margin=self.safety_margin)
-            if path and start_cell != real_start:
-                path = PathPlanner.resample_path([real_start] + path)
-                if not PathPlanner.check_body_traversability(
-                        self.mapdata, path, self.body_bounds,
-                        margin=self.safety_margin):
-                    path = None
+            path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, goal_cell)
 
             if path:
+                # Stitch robot's real position to the front if start was nudged
+                if start_cell != real_start:
+                    path = [real_start] + path
+                path = self._truncate_at_blind_turns(path)
                 self.user_goal_fails = 0
-                self._publish_path(path, real_start, start_cell)
+                self.current_path = path
+                path_msg = PathPlanner.path_to_message(self.mapdata, path, self.get_clock().now().to_msg())
+                self.path_pub.publish(path_msg)
             else:
                 self.user_goal_fails += 1
                 if self.user_goal_fails <= 3:
-                    self.get_logger().warning(
-                        'Path to manual goal blocked '
-                        f'({self.user_goal_fails}/3). Retrying...')
+                    self.get_logger().warn(
+                        f"Path to manual goal blocked ({self.user_goal_fails}/3). Retrying...")
                 else:
-                    self.get_logger().error(
-                        'Manual goal is unreachable! Cancelling command.')
-                    self._finish_manual_goal()
-            return
+                    self.get_logger().error("Manual goal is unreachable! Cancelling command.")
+                    self.current_path = []
+                    self.path_pub.publish(Path())
+                    self.user_goal_centroid = None
+                    self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                    self.user_goal_fails = 0
+            return 
         # ──────────────────────────────────────────────────────────────
 
         # ── RETURNING HOME STATE ──────────────────────────────────────
         if self.returning_home:
             if self._dist_to_point(self.initial_pose) < self.GOAL_REACHED_DIST:
-                self.get_logger().info(
-                    'Safely returned to original position. '
-                    'Exploration fully complete!')
+                self.get_logger().info("Safely returned to original position. Exploration fully complete!")
                 self.current_path = []
-                self._publish_stop()
+                self.path_pub.publish(Path())
                 self.is_finished_exploring = True
-                self.exploration_complete = True
-
+                
                 # REVERT BACK TO NORMAL
                 self.active_kernel = self.DEFAULT_KERNEL_SIZE
                 self.return_home_fails = 0
                 return
 
-            raw_home = PathPlanner.world_to_grid(
-                self.mapdata, self.initial_pose)
+            home_cell = PathPlanner.world_to_grid(self.mapdata, self.initial_pose)
+            
+            if not PathPlanner.is_cell_walkable(cspace, home_cell):
+                found_home = False
+                for r in range(1, 15):
+                    for dx in range(-r, r + 1):
+                        for dy in range(-r, r + 1):
+                            if abs(dx) == r or abs(dy) == r:
+                                cand = (home_cell[0] + dx, home_cell[1] + dy)
+                                if PathPlanner.is_cell_walkable(cspace, cand):
+                                    home_cell = cand
+                                    found_home = True
+                                    break
+                            if found_home: break
+                        if found_home: break
+                    if found_home: break
 
-            home_cell = (
-                self._nearest_walkable(self._cspace_walkable, raw_home)
-                or raw_home)
-            path, _, _, _ = planner.a_star(start_cell, home_cell)
-            if (path and home_cell != raw_home
-                    and self._dist_to_point(PathPlanner.grid_to_world(
-                        self.mapdata, home_cell)) < self.GOAL_REACHED_DIST):
-                # We reached the inflated boundary, not home. Let the existing
-                # retry policy reduce inflation instead of republishing a
-                # singleton path forever.
-                path = None
+            path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, home_cell)
 
             if path:
-                self.return_home_fails = 0  # Reset fails, KEEP active_kernel
-                self._publish_path(path, real_start, start_cell)
+                # Stitch robot's real position to the front if start was nudged
+                if start_cell != real_start:
+                    path = [real_start] + path
+                path = self._truncate_at_blind_turns(path)
+                self.return_home_fails = 0 # Reset fails, KEEP active_kernel
+                self.current_path = path
+                path_msg = PathPlanner.path_to_message(self.mapdata, path, self.get_clock().now().to_msg())
+                self.path_pub.publish(path_msg)
             else:
                 self.return_home_fails += 1
-
+                
                 if self.return_home_fails <= 5:
-                    self.active_kernel = max(
-                        self._minimum_kernel, self.active_kernel - 2)
-                    self.get_logger().warning(
-                        'Path home blocked. Shrinking C-Space to '
-                        f'{self.active_kernel} '
-                        f'({self.return_home_fails}/5)...')
+                    self.active_kernel = max(1, self.active_kernel - 2)
+                    self.get_logger().warn(f"Path home blocked. Shrinking C-Space to {self.active_kernel} ({self.return_home_fails}/5)...")
                 else:
-                    self.get_logger().error(
-                        'Path completely blocked even with reduced '
-                        'safety margin. Shutting down.')
+                    self.get_logger().error("Path completely blocked even with reduced safety margin. Shutting down.")
                     self.current_path = []
-                    self._publish_stop()
+                    self.path_pub.publish(Path())
                     self.is_finished_exploring = True
-                    self.exploration_complete = True
-                    # Reset if we give up
-                    self.active_kernel = self.DEFAULT_KERNEL_SIZE
+                    self.active_kernel = self.DEFAULT_KERNEL_SIZE # Reset if we give up
             return
         # ──────────────────────────────────────────────────────────────
 
         # ── EXPLORATION STATE ─────────────────────────────────────────
+        
+        # Ensure we always use the safest kernel for standard exploration
+        self.active_kernel = self.DEFAULT_KERNEL_SIZE 
+        
+        frontiers  = self.search_frontiers(start_cell)
+        self._publish_markers(frontiers)
 
-        frontiers = self.search_frontiers(real_start)
-        self._evaluate_frontiers(frontiers, planner, start_cell)
+        # If we still have a goal but its frontier disappeared, check path
+        if not self._goal_still_valid(frontiers) and self.current_goal_centroid is not None:
+            if self._is_path_blocked():
+                self.get_logger().info("Current frontier gone AND path blocked — will replan.")
+                self.current_goal_centroid = None
+                self.current_path = []
+            else:
+                # Frontier centroid drifted but path is still clear — keep driving
+                self.get_logger().debug("Frontier centroid drifted but path is clear. Staying committed.")
+                return
+
+
+        # We only reach here when current_goal_centroid is None (need a new goal)
+
+        top_frontiers = sorted(frontiers, key=lambda f: f.size, reverse=True)[: self.TOP_K_FRONTIERS]
 
         lowest_cost = float('inf')
-        best_path, best_centroid = self._resume_frontier_path(
-            frontiers, planner, start_cell)
+        best_path   = None
+        best_centroid = None
 
-        # Filter the entire set before limiting search work. Previously five
-        # large blocked/visited edges could permanently hide smaller openings.
-        candidates = sorted(
-            (f for f in frontiers if f.approach is not None),
-            key=lambda f: self._dist_to_point(f.approach))
-        for offset in range(0, len(candidates), self.PLAN_BATCH_SIZE):
-            if best_path is not None:
-                break
-            batch = candidates[offset:offset + self.PLAN_BATCH_SIZE]
-            goals = [PathPlanner.world_to_grid(self.mapdata, f.approach)
-                     for f in batch]
-            results = planner.a_star_many(start_cell, goals)
-            for frontier, (path, distance, _, _) in zip(batch, results):
-                if not path or distance is None:
-                    continue
-                if not PathPlanner.check_body_traversability(
-                        self.mapdata, path, self.body_bounds):
-                    continue
-                cost = 10.0 * distance + 1.0 / frontier.size
-                if cost < lowest_cost:
-                    lowest_cost = cost
-                    best_path = path
-                    best_centroid = frontier.approach
+        for f in top_frontiers:
+            is_blacklisted = False
+            for bc in self.blacklisted_centroids:
+                if math.hypot(f.centroid.x - bc.x, f.centroid.y - bc.y) < 1.0:
+                    is_blacklisted = True
+                    break
+            if is_blacklisted:
+                continue
+
+            goal_cell = PathPlanner.world_to_grid(self.mapdata, f.centroid)
+            
+            if not PathPlanner.is_cell_walkable(cspace, goal_cell):
+                continue
+
+            path, a_star_cost, _, _ = PathPlanner.a_star(cspace, cost_map, start_cell, goal_cell)
+            # Stitch robot's real position to the front if start was nudged
+            if path and start_cell != real_start:
+                path = [real_start] + path
+
+            if not path or not a_star_cost:
+                continue
+
+            cost = 10.0 * a_star_cost + (1.0 / f.size)
+
+            if (self.current_goal_centroid is not None
+                    and math.hypot(f.centroid.x - self.current_goal_centroid.x,
+                                   f.centroid.y - self.current_goal_centroid.y) < 1.0):
+                cost *= (1.0 - self.CURRENT_GOAL_BONUS)
+
+            if cost < lowest_cost:
+                lowest_cost   = cost
+                best_path     = path
+                best_centroid = f.centroid
 
         if best_path and best_centroid:
-            self.no_frontiers_found_counter = 0
+            self.no_frontiers_found_counter = 0  
             if best_centroid != self.current_goal_centroid:
-                self.get_logger().info(
-                    f'New frontier goal: ({best_centroid.x:.2f}, '
-                    f'{best_centroid.y:.2f})')
+                self.get_logger().info(f"New frontier goal: ({best_centroid.x:.2f}, {best_centroid.y:.2f})")
             self.current_goal_centroid = best_centroid
-            self.last_replan_time = self.get_clock().now()
-            self.goal_start_time = self.get_clock().now()
-            self.last_progress_time = time.monotonic()
-            self.best_path_idx = 0
-
-            self._publish_path(best_path, real_start, start_cell)
+            self.last_replan_time      = self.get_clock().now()
+            self.goal_start_time       = self.get_clock().now()
+            self.last_progress_time    = self.get_clock().now()
+            self.best_path_idx         = 0
+            
+            best_path = self._truncate_at_blind_turns(best_path)
+            self.current_path = best_path
+            path_msg = PathPlanner.path_to_message(
+                self.mapdata, best_path, self.get_clock().now().to_msg())
+            self.path_pub.publish(path_msg)
         else:
-            self.current_path = []
-            self._publish_stop()  # no valid path — stop Pure Pursuit
-            # Retry temporary obstructions before declaring exhaustion.
-            if (any(f.status == 'deferred' for f in frontiers)
-                    and any(math.isfinite(item.expires)
-                            for item in self._frontier_exclusions)):
-                self.no_frontiers_found_counter = 0
-                self._publish_markers(frontiers)
-                return
             self.no_frontiers_found_counter += 1
+            self.current_path = []
+            self.path_pub.publish(Path())  # no valid path — stop Pure Pursuit
             if self.no_frontiers_found_counter >= self.NUM_EXPLORE_FAILS:
-                self.get_logger().info(
-                    'No unvisited footprint-safe frontier viewpoints remain '
-                    f'({len(frontiers)} boundary segments still visible). '
-                    'Returning to original position...')
-                self.exploration_complete = True
+                self.get_logger().info("All reachable frontiers discovered! Returning to original position...")
                 self.returning_home = True
                 self.current_goal_centroid = None
+                self._publish_markers([])  
             else:
-                self.get_logger().debug(
-                    'Evaluating remaining frontiers. '
-                    f'{self.no_frontiers_found_counter}/'
-                    f'{self.NUM_EXPLORE_FAILS} fails before returning home.')
-        self._publish_markers(frontiers)
+                self.get_logger().debug(f"Evaluating remaining frontiers. {self.no_frontiers_found_counter}/{self.NUM_EXPLORE_FAILS} fails before returning home.")
 
     # ── marker visualisation ─────────────────────────────────────────
 
-    def _refresh_markers(self):
-        """Keep diagnostics visible during driving, pauses and mission completion."""
-        if self.mapdata is None or self.pose is None:
-            return
-        start = PathPlanner.world_to_grid(self.mapdata, self.pose.position)
-        frontiers = self.search_frontiers(start)
-        self._evaluate_frontiers(frontiers, self._prepare_planning_grid(), start)
-        self._publish_markers(frontiers)
-
     def _publish_markers(self, frontiers):
         ma = MarkerArray()
-        frame = self.mapdata.header.frame_id or 'odom'
-        stamp = self.get_clock().now().to_msg()
 
-        def marker(namespace, index, kind):
-            result = Marker()
-            result.header.frame_id = frame
-            result.header.stamp = stamp
-            result.ns = namespace
-            result.id = index
-            result.type = kind
-            result.action = Marker.ADD
-            result.pose.orientation.w = 1.0
-            ma.markers.append(result)
-            return result
-
-        clear = marker('frontiers', 0, Marker.SPHERE)
+        clear = Marker()
         clear.action = Marker.DELETEALL
-        boundary = marker('frontier_boundaries', 0, Marker.POINTS)
-        boundary.pose.position.z = 0.04
-        boundary.scale.x = boundary.scale.y = self.mapdata.info.resolution
-        boundary.color.g = boundary.color.b = 1.0
-        boundary.color.a = 0.85
-        colors = {'reachable': (0.1, 1.0, 0.1),
-                  'deferred': (1.0, 0.5, 0.0),
-                  'blocked': (0.55, 0.55, 0.55)}
-        for index, frontier in enumerate(frontiers):
-            if frontier.cells is not None:
-                boundary.points.extend(
-                    PathPlanner.grid_to_world(self.mapdata, tuple(map(int, cell)))
-                    for cell in frontier.cells)
-            viewpoint = marker('frontier_viewpoints', index, Marker.SPHERE)
-            viewpoint.pose.position = (frontier.approach if frontier.approach
-                                       is not None else frontier.centroid)
-            viewpoint.pose.position = Point(
-                x=viewpoint.pose.position.x, y=viewpoint.pose.position.y, z=0.12)
-            viewpoint.scale.x = viewpoint.scale.y = viewpoint.scale.z = 0.22
-            viewpoint.color.r, viewpoint.color.g, viewpoint.color.b = colors[
-                frontier.status]
-            viewpoint.color.a = 0.95
+        ma.markers.append(clear)
 
-        if self.current_goal_centroid is not None:
-            active = marker('frontier_active', 0, Marker.SPHERE)
-            goal = self.current_goal_centroid
-            active.pose.position = Point(x=goal.x, y=goal.y, z=0.2)
-            active.scale.x = active.scale.y = active.scale.z = 0.30
-            active.color.r = active.color.g = active.color.a = 1.0
+        for i, bc in enumerate(self.blacklisted_centroids):
+            m = Marker()
+            m.header.frame_id = "odom"
+            m.header.stamp    = self.get_clock().now().to_msg()
+            m.ns              = "blacklisted"
+            m.id              = i + 1000  
+            m.type            = Marker.SPHERE
+            m.action          = Marker.ADD
+            m.pose.position   = bc
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.3
+            m.color.r = 1.0
+            m.color.g = 0.0
+            m.color.b = 0.0
+            m.color.a = 0.5
+            ma.markers.append(m)
+
+        for i, f in enumerate(frontiers[:self.TOP_K_FRONTIERS]):
+            m = Marker()
+            m.header.frame_id = "odom"
+            m.header.stamp    = self.get_clock().now().to_msg()
+            m.ns              = "frontiers"
+            m.id              = i + 1
+            m.type            = Marker.SPHERE
+            m.action          = Marker.ADD
+            m.pose.position   = f.centroid
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.2
+
+            is_current = (
+                self.current_goal_centroid is not None
+                and math.hypot(
+                    f.centroid.x - self.current_goal_centroid.x,
+                    f.centroid.y - self.current_goal_centroid.y) < 1.0)
+
+            m.color.r = 1.0 if is_current else 0.0
+            m.color.g = 0.0 if is_current else 1.0
+            m.color.b = 0.0
+            m.color.a = 0.9
+            ma.markers.append(m)
+
         self.marker_pub.publish(ma)
 
 
@@ -1137,5 +707,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -98,7 +98,7 @@ nodes to populate them. The display topics are already configured.
 The **Frontiers** display subscribes to `/frontiers_vis` and shows all currently
 detected frontiers, including candidates the robot cannot presently reach:
 
-- **Green:** reachable approach goals.
+- **Green:** connected candidate viewpoints.
 - **Yellow:** the active goal.
 - **Orange:** temporarily deferred frontiers.
 - **Gray:** blocked frontiers.
@@ -113,6 +113,33 @@ appears when RViz opens after exploration has already started.
 ros2 launch simple_robot_description autonomous_nav.launch.py
 ```
 
+Navigation gets collision dimensions from `/robot_description` and positions
+all collision links through TF2. Both the planner and controller wait for the
+complete model and use the same footprint and clearance margin. Changing the
+URDF updates the navigation geometry; there is no fixed C-space kernel or
+automatic reduction of safety clearance to force a route through an obstacle.
+
+Live LiDAR obstacles are shared with the planner on
+`/navigation/local_obstacles`. The controller evaluates forward steering arcs
+and their braking clearance while the explorer checks the route ahead for
+obstacles. A valid detour replaces the active route in one update. The robot
+brakes when no safe motion is available. If it stays stuck and no frontier
+route is available, it tries one short escape with fresh sensors. It prefers
+forward motion, then backs out if the rear sweep is clear and retries planning.
+
+Exploration finishes reachable frontier viewpoints in the current area before
+moving to another area. Areas use a 4 m travel radius through known free space,
+so frontiers across a wall are not treated as nearby. Within an area, selection
+considers driving distance and turning time. Blocked viewpoints can be retried
+later. The explorer tries alternate viewpoints and keeps the mission pending
+while frontier boundaries remain without a safe route.
+
+Adjust the area radius for your environment when launching, for example:
+
+```sh
+ros2 launch simple_robot_description autonomous_nav.launch.py local_area_radius:=5.0
+```
+
 Manual goals sent through RViz's **2D Goal Pose** tool interrupt the active
 exploration task. After reaching the waypoint, the robot plans a fresh route
 from its current position to the interrupted frontier if it is still valid
@@ -122,8 +149,8 @@ manual waypoint preserves the original interrupted task.
 After all reachable frontiers have been discovered, a manual goal overrides
 any return-home trip. The robot goes to the waypoint and stays there. Rejected
 or unreachable manual goals also preserve this completed state; during active
-exploration, those outcomes resume the interrupted task. If no eligible
-frontiers remain when a manual command ends, the robot stays at its current
+exploration, those outcomes resume the interrupted task. If no reachable map
+boundaries remain when a manual command ends, the robot stays at its current
 position.
 
 ### Run Robot Control Node (Manual Control using W,S,A,D (optional))
