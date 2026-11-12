@@ -30,6 +30,14 @@ class Grid:
         return np.all((cells >= 0) & (cells < self.values.shape[::-1]), axis=-1)
 
 
+@dataclass
+class FrontierMemory:
+    """Keep the active neighborhood across goals and temporary stops."""
+
+    area: Grid | None = None
+    goal: tuple | None = None
+
+
 _CARDINAL_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 _DIAGONAL_STEPS = ((1, 1), (1, -1), (-1, 1), (-1, -1))
 # Circumscribed footprint from the robot's 0.40 m by 0.30 m chassis.
@@ -82,13 +90,89 @@ def _route(free, start, goal):
     return None
 
 
-def _locale_rank(grid, eligible_frontier, goals, distance, unknown,
-                 previous_goal):
-    """Rank the neighborhoods ("locales") of the candidate frontier cells.
+def _travel_distances(free, start, goals, resolution):
+    """Measure exact travel to candidates, stopping once they are settled."""
+    _, width = free.shape
+    stride = width + 2
+    # Padding removes per-neighbor bounds checks; Python lists avoid NumPy
+    # scalar indexing in the inner loop. Motion and corner rules match _route.
+    walk = np.pad(free, 1).ravel().tolist()
+    distance = [math.inf] * len(walk)
+    first = int((start[1] + 1) * stride + start[0] + 1)
+    targets = ((goals[:, 1] + 1) * stride + goals[:, 0] + 1).tolist()
+    pending = [False] * len(walk)
+    remaining = 0
+    for cell in targets:
+        if not pending[cell]:
+            pending[cell] = True
+            remaining += 1
+    distance[first] = 0.0
+    queue = [(0.0, first)]
+    diagonal = math.sqrt(2.0)
+    steps = (
+        (1, 1.0, 0, 0), (-1, 1.0, 0, 0),
+        (stride, 1.0, 0, 0), (-stride, 1.0, 0, 0),
+        (stride + 1, diagonal, stride, 1),
+        (stride - 1, diagonal, stride, -1),
+        (-stride + 1, diagonal, -stride, 1),
+        (-stride - 1, diagonal, -stride, -1),
+    )
+    while queue and remaining:
+        cost, cell = heappop(queue)
+        if cost > distance[cell]:
+            continue
+        if pending[cell]:
+            pending[cell] = False
+            remaining -= 1
+            if not remaining:
+                break
+        for offset, length, side_a, side_b in steps:
+            neighbor = cell + offset
+            if not walk[neighbor]:
+                continue
+            if side_a and not (walk[cell + side_a] and walk[cell + side_b]):
+                continue
+            next_cost = cost + length
+            if next_cost < distance[neighbor]:
+                distance[neighbor] = next_cost
+                heappush(queue, (next_cost, neighbor))
+    return np.asarray([distance[cell] for cell in targets]) * resolution
+
+
+def _remembered_area(grid, memory):
+    """Reproject the active area when the map origin or resolution changes."""
+    area = np.zeros(grid.values.shape, dtype=bool)
+    if memory is None or memory.area is None:
+        return area
+    previous = memory.area
+    if (previous.values.shape == grid.values.shape
+            and previous.origin == grid.origin
+            and previous.resolution == grid.resolution):
+        return previous.values.astype(bool, copy=True)
+    y, x = np.nonzero(previous.values)
+    cells = grid.cells(previous.centers(np.column_stack((x, y))))
+    x, y = cells[grid.contains(cells)].T
+    area[y, x] = True
+    return area
+
+
+def _frontier_locales(grid, eligible_frontier):
+    """Label frontier neighborhoods independently of their travel ranking."""
+    radius = math.ceil(_LOCALE_RADIUS / grid.resolution)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    _, labels = cv2.connectedComponents(
+        cv2.dilate(eligible_frontier, kernel), connectivity=8)
+    return labels
+
+
+def _locale_rank(grid, labels, goals, distance, unknown, previous_goal):
+    """
+    Rank the neighborhoods ("locales") of the candidate frontier cells.
 
     Frontier cells within 2 * _LOCALE_RADIUS of each other form one locale: a
     place the robot can clear in a single visit. Each locale is scored by the
-    length of the whole exploration tour that begins there (drive to the
+    estimated length of the exploration tour that begins there (drive to the
     locale, then keep going to the nearest locale not yet visited), less a
     bonus for the unmapped area it still holds. Beginning with a distant
     locale wins whenever doing the near ones first would force a long trip
@@ -98,13 +182,8 @@ def _locale_rank(grid, eligible_frontier, goals, distance, unknown,
     appears while the robot is driving joins a nearby locale (raising its
     value) or becomes a locale of its own, and is weighed in the next plan.
 
-    Returns the rank (0 = visit first) of the locale of every row of `goals`.
+    Return each goal's locale rank (0 = first).
     """
-    radius = math.ceil(_LOCALE_RADIUS / grid.resolution)
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
-    _, labels = cv2.connectedComponents(
-        cv2.dilate(eligible_frontier, kernel), connectivity=8)
     # Dilated blobs are disjoint, so no unknown cell counts for two locales.
     unknown_area = np.bincount(
         labels.ravel(), weights=unknown.ravel()) * grid.resolution ** 2
@@ -149,7 +228,7 @@ def _locale_rank(grid, eligible_frontier, goals, distance, unknown,
 def frontier_is_productive(grid, goal):
     """Return whether a goal still borders enough unmapped space to explore."""
     cell = grid.cells(np.asarray(goal))
-    if not grid.contains(cell):
+    if not grid.contains(cell) or grid.values[cell[1], cell[0]] != 0:
         return False
     unknown = (grid.values == -1).astype(np.float32)
     diameter = 2 * math.ceil(0.25 / grid.resolution) + 1
@@ -208,12 +287,14 @@ def frontier_points(grid, pose, hits):
     return grid.centers(goals[valid])
 
 
-def plan_frontier(grid, pose, hits, previous_goal, target_goal=None):
-    """Plan through mapped free space to a frontier or a specified goal.
+def plan_frontier(grid, pose, hits, previous_goal, target_goal=None, memory=None):
+    """
+    Plan through mapped free space to a frontier or a specified goal.
 
-    Call this repeatedly while driving, not only when a goal is reached: the
-    frontier choice is rebuilt from the live map each time, which is how newly
-    discovered frontiers get weighed against the one being driven to.
+    Rebuild candidates from the live map. When memory is supplied, finish the
+    active neighborhood before choosing another, preserving all its remaining
+    parts if a frontier splits. Within that area, prefer short actual routes
+    so a larger frontier across an obstacle does not cause repeated detours.
     """
     start = grid.cells(np.asarray(pose[:2]))
     if not grid.contains(start):
@@ -253,6 +334,8 @@ def plan_frontier(grid, pose, hits, previous_goal, target_goal=None):
     reachable = labels == labels[start_cell[1], start_cell[0]]
 
     if target_goal is None:
+        if previous_goal is None and memory is not None:
+            previous_goal = memory.goal
         unknown = (grid.values == -1).astype(np.float32)
         diameter = 2 * math.ceil(0.25 / grid.resolution) + 1
         gain = cv2.boxFilter(unknown, -1, (diameter, diameter),
@@ -289,36 +372,46 @@ def plan_frontier(grid, pose, hits, previous_goal, target_goal=None):
                 grid.centers(goals) - previous_goal, axis=1) < 0.25)
             score[same_frontier] -= 1.0
             keep_goal = same_frontier
-        # Group adjacent frontier cells into local regions. Prefer a region
-        # with more remaining unknown space so the robot completes that area
-        # in one visit instead of returning to it later.
+        # Group adjacent frontier cells into regions, using their remaining
+        # unknown space to break ties between equally short routes.
         eligible_frontier = np.zeros_like(frontier, dtype=np.uint8)
         eligible_frontier[goals[:, 1], goals[:, 0]] = 1
         _, regions = cv2.connectedComponents(eligible_frontier,
-                                              connectivity=8)
+                                             connectivity=8)
         region_ids = regions[goals[:, 1], goals[:, 0]]
         region_sizes = np.bincount(regions.ravel())
         region_gain = np.bincount(regions.ravel(), weights=gain.ravel())
         region_priority = (
             region_gain[region_ids]
             + 0.05 * region_sizes[region_ids])
-        # Locale awareness is the outermost policy: first decide which
-        # neighborhood of frontiers to work next, weighing the cost of having
-        # to come back to it later (see _locale_rank). Inside that locale,
-        # finish the goal already being driven to while it is still a
-        # frontier; otherwise region productivity is the primary policy, and
-        # within equally productive regions prefer the nearest safe candidate
-        # and then its score.
-        locale_rank = _locale_rank(grid, eligible_frontier, goals, distance,
-                                   unknown, previous_goal)
+        locales = _frontier_locales(grid, eligible_frontier)
+        remembered = _remembered_area(grid, memory)
+        active_ids = np.unique(locales[remembered & (locales != 0)])
+        goal_locales = locales[goals[:, 1], goals[:, 0]]
+        active = np.isin(goal_locales, active_ids)
+        # Every surviving part of the active area outranks other locales.
+        # Keep a productive goal, then finish the nearest remaining work;
+        # productivity breaks travel ties instead of triggering long detours.
+        if np.any(active):
+            # No global tour is needed while committed. Search only far enough
+            # to settle the active candidates, rather than the whole free map.
+            travel = np.full(len(goals), np.inf)
+            travel[active] = _travel_distances(
+                free, start_cell, goals[active], grid.resolution)
+            locale_priority = (~active).astype(int)
+        else:
+            travel = _travel_distances(
+                free, start_cell, goals, grid.resolution)
+            locale_priority = _locale_rank(
+                grid, locales, goals, travel, unknown, previous_goal)
         candidate_order = np.lexsort(
-            (score, distance, -region_priority,
-             (~keep_goal).astype(int), locale_rank))
+            (score, -region_priority, travel,
+             (~keep_goal).astype(int), locale_priority))
     else:
         target = grid.cells(np.asarray(target_goal))
-        if (not grid.contains(target) or
-                not free[target[1], target[0]] or
-                not reachable[target[1], target[0]]):
+        if (not grid.contains(target)
+                or not free[target[1], target[0]]
+                or not reachable[target[1], target[0]]):
             return None
         goals = np.asarray([target])
         candidate_order = (0,)
@@ -334,6 +427,13 @@ def plan_frontier(grid, pose, hits, previous_goal, target_goal=None):
     path_centers = grid.centers(path)
     if start_cell != tuple(start):
         path_centers = np.vstack(([pose[:2]], path_centers))
+    if memory is not None and target_goal is None:
+        if active[candidate]:
+            area = remembered | np.isin(locales, active_ids)
+        else:
+            area = locales == goal_locales[candidate]
+        memory.area = Grid(area, grid.origin, grid.resolution)
+        memory.goal = tuple(path_centers[-1])
     return path_centers
 
 
